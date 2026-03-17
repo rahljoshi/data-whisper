@@ -1,0 +1,124 @@
+---
+alwaysApply: true
+---
+# Feature Development Agent Rule
+
+## 🗂️ Before Writing Any Code
+
+1. Create `plan.md` in the root with this structure:
+   - Feature name + goal
+   - List of TODOs (checkboxes)
+   - Acceptance criteria
+   - Test plan summary
+
+2. Commit and push `plan.md` immediately:
+```
+   git add plan.md
+   git commit -m "plan: <feature-name> - initial plan"
+   git push
+```
+
+---
+
+## ✅ TODO Workflow (per task)
+
+For every single TODO in `plan.md`:
+
+1. **Write the test first** (TDD) — no implementation code before test exists
+2. Run the test → confirm it FAILS (red)
+3. Write minimum code to make it pass (green)
+4. Refactor if needed
+5. Mark the TODO as done in `plan.md` (`- [x]`)
+6. Update `README.md` if the feature changes any public API, endpoint, env var, or setup step
+7. Commit and push:
+```
+   git add .
+   git commit -m "feat(<feature>): <what-was-done> [todo: <todo-title>]"
+   git push
+```
+
+Every TODO = one commit. Never batch multiple TODOs into one commit.
+
+---
+
+## 🧪 Test Rules
+
+- Tests must be **meaningful** — test real behavior, not implementation details
+- No tests like `expect(true).toBe(true)` or testing that a variable exists
+- Each test must have a clear Arrange / Act / Assert structure
+- Test file must live next to the module: `foo.ts` → `foo.test.ts`
+- Cover:
+  - Happy path
+  - Edge cases (empty input, nulls, large data)
+  - Failure/error paths (rejected queries, timeouts, invalid SQL)
+- Never mock what you don't own — mock at the boundary (DB, external APIs)
+- Tests should run fast — no real DB calls in unit tests, use mocks/fixtures
+
+---
+
+## 📖 README.md Update Rules
+
+Update `README.md` whenever:
+- A new endpoint is added or changed
+- A new env variable is required
+- Setup steps change
+- A new feature is complete
+
+README must always have:
+- Project description
+- Tech stack
+- Setup instructions
+- Env variables table
+- API endpoints with request/response examples
+- Architecture overview (brief)
+
+---
+
+## 🧹 End-of-Plan Cleanup Pass
+
+After all TODOs are checked off, run a full cleanup:
+
+### Code audit — remove:
+- Unused imports
+- Dead functions or variables
+- Console.log / debug statements
+- Commented-out code blocks
+- TODO comments that were already done
+- Any file not imported or used anywhere
+
+### Test audit:
+- Remove duplicate tests
+- Remove tests that test nothing real
+- Ensure all tests still pass after cleanup
+
+### Final checks:
+- Run full test suite — must be 100% passing
+- Run TypeScript compiler — zero errors
+- Check bundle/build has no warnings
+
+### Final commit:
+```
+git add .
+git commit -m "chore: cleanup and finalize <feature-name>"
+git push
+```
+
+---
+
+## 🔒 Hard Rules (never break these)
+
+- NEVER commit `.env` or any file containing secrets, API keys, tokens, DB credentials, or passwords
+- `.env` must ALWAYS be in `.gitignore` before the first commit — if it isn't, add it immediately and verify with `git check-ignore -v .env`
+- ALWAYS use `.env.example` with dummy values as a template — commit only that
+- If a secret is accidentally committed, treat it as **compromised immediately** — rotate the key, then remove it from git history using `git filter-branch` or `gh secret` tooling
+- NEVER hardcode secrets inline in any file — no API keys in source files, config files, or test files
+- NEVER log secrets — no `console.log(process.env.ANYTHING_SENSITIVE)`
+- NEVER put secrets in comments
+- Before every `git push`, mentally verify: am I pushing any credentials, tokens, or private keys?
+- NEVER push code with failing tests
+- NEVER skip writing a test before implementation
+- NEVER commit multiple TODOs in one commit
+- NEVER leave console.logs in final code
+- NEVER leave unused dependencies in package.json
+- ALWAYS update plan.md checkbox before committing
+- ALWAYS keep README.md truthful and up to date
