@@ -1,5 +1,9 @@
+export type QueryMode = 'READ_ONLY' | 'CRUD_ENABLED';
+
 export interface QueryRequest {
-  question: string;
+  query: string;
+  mode?: QueryMode;
+  confirm_write?: boolean;
 }
 
 export interface QueryResponse {
@@ -7,6 +11,24 @@ export interface QueryResponse {
   explanation: string;
   data: Record<string, unknown>[];
   row_count: number;
+  type: 'READ' | 'WRITE';
+  affected_rows?: number;
+}
+
+export interface WriteImpact {
+  affected_rows: number;
+  preview: Record<string, unknown>[];
+  warning: string;
+}
+
+export interface WriteConfirmationResponse {
+  status: 'AWAITING_CONFIRMATION';
+  type: 'WRITE';
+  operation: 'DELETE' | 'UPDATE';
+  impact: WriteImpact;
+  query: string;
+  explanation: string;
+  confirm_to_proceed: string;
 }
 
 export interface ErrorResponse {

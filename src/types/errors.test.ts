@@ -41,6 +41,21 @@ describe('AppError', () => {
       const err = new AppError(ErrorType.INTERNAL_ERROR, 'unexpected');
       expect(err.statusCode).toBe(500);
     });
+
+    it('maps WRITE_NOT_ALLOWED to 403', () => {
+      const err = new AppError(ErrorType.WRITE_NOT_ALLOWED, 'write blocked');
+      expect(err.statusCode).toBe(403);
+    });
+
+    it('maps MISSING_WHERE_CLAUSE to 400', () => {
+      const err = new AppError(ErrorType.MISSING_WHERE_CLAUSE, 'no WHERE');
+      expect(err.statusCode).toBe(400);
+    });
+
+    it('maps SCHEMA_VIOLATION to 400', () => {
+      const err = new AppError(ErrorType.SCHEMA_VIOLATION, 'unknown table');
+      expect(err.statusCode).toBe(400);
+    });
   });
 
   describe('toJSON()', () => {
