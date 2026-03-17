@@ -62,13 +62,25 @@ DATABASE_URL=postgresql://user:password@localhost:5432/mydb
 REDIS_URL=redis://localhost:6379
 ```
 
-### 3. Build
+### 3. Load mock data (optional but recommended)
+
+A full seed file is provided with 8 tables and realistic e-commerce data:
+
+```bash
+psql -U <user> -d <database> -f database/seed.sql
+```
+
+This creates: `departments`, `employees`, `categories`, `products`, `customers`, `orders`, `order_items`, `reviews` — with ~200 rows across all tables.
+
+See [`database/example-queries.md`](database/example-queries.md) for 40+ ready-to-use natural language test questions.
+
+### 4. Build
 
 ```bash
 npm run build
 ```
 
-### 4. Start
+### 5. Start
 
 ```bash
 # Production
