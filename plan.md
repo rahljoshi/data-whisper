@@ -8,15 +8,15 @@ Extend the NL→SQL pipeline with a configurable `mode` field that controls whet
 ## TODOs
 
 - [x] Create `plan.md` and commit
-- [ ] Update types: `QueryRequest`, `QueryResponse`, `WriteConfirmationResponse`, new error codes
-- [ ] Update `sqlGenerator` to emit mode-aware system prompts
-- [ ] Update `sqlValidator` for CRUD mode: allow INSERT/UPDATE/DELETE, enforce WHERE, reject DROP/ALTER/TRUNCATE
-- [ ] Implement write confirmation flow in route: dry-run preview, `AWAITING_CONFIRMATION` response, `confirm_write` gate
-- [ ] Write tests for mode-aware `sqlGenerator`
-- [ ] Write tests for CRUD-mode `sqlValidator`
-- [ ] Write tests for write confirmation flow in route
-- [ ] Update `README.md` with new API docs
-- [ ] Cleanup pass: remove dead code, unused imports, ensure full test pass
+- [x] Update types: `QueryRequest`, `QueryResponse`, `WriteConfirmationResponse`, new error codes
+- [x] Update `sqlGenerator` to emit mode-aware system prompts
+- [x] Update `sqlValidator` for CRUD mode: allow INSERT/UPDATE/DELETE, enforce WHERE, reject DROP/ALTER/TRUNCATE
+- [x] Implement write confirmation flow in route: dry-run preview, `AWAITING_CONFIRMATION` response, `confirm_write` gate
+- [x] Write tests for mode-aware `sqlGenerator`
+- [x] Write tests for CRUD-mode `sqlValidator`
+- [x] Write tests for write confirmation flow in route
+- [x] Update `README.md` with new API docs
+- [x] Cleanup pass: remove dead code, unused imports, ensure full test pass
 
 ---
 
