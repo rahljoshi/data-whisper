@@ -1,0 +1,13 @@
+# Keep Cursor AI context fast
+
+node_modules/
+dist/
+build/
+coverage/
+*.log
+logs/
+.env
+.env.*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
