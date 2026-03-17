@@ -2,27 +2,21 @@ import { Parser } from 'node-sql-parser';
 import type { AST, Select, Column, From } from 'node-sql-parser';
 import { AppError, ErrorType } from '../types/errors';
 import type { DbSchema } from '../types/schema';
+import type { QueryMode } from '../types/api';
 import { config } from '../config';
 
 const parser = new Parser();
 
-const ALLOWED_STATEMENT_TYPES = new Set(['select']);
+/** Statement types that are never allowed regardless of mode. */
+const DDL_BLOCKED = new Set(['drop', 'alter', 'truncate', 'create', 'rename', 'replace', 'merge', 'call', 'grant', 'revoke']);
 
-const BLOCKED_STATEMENT_TYPES = new Set([
-  'insert',
-  'update',
-  'delete',
-  'drop',
-  'alter',
-  'truncate',
-  'create',
-  'rename',
-  'replace',
-  'merge',
-  'call',
-  'grant',
-  'revoke',
-]);
+/** Statement types allowed only in CRUD_ENABLED mode (in addition to SELECT). */
+const CRUD_WRITE_TYPES = new Set(['insert', 'update', 'delete']);
+
+export interface SqlValidationResult {
+  sql: string;
+  statementType: 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE';
+}
 
 /**
  * Resolve a table name to its canonical qualified key in the schema.
@@ -30,7 +24,6 @@ const BLOCKED_STATEMENT_TYPES = new Set([
  */
 function resolveTableKey(name: string, schema: DbSchema): string | null {
   if (schema.has(name)) return name;
-  // Try qualifying with default schemas
   for (const dbSchema of config.db.schemas) {
     const qualified = `${dbSchema}.${name}`;
     if (schema.has(qualified)) return qualified;
@@ -99,18 +92,223 @@ function injectLimit(ast: Select, maxRows: number): void {
   }
 }
 
+/** Validate all table names against the schema; throws with the given error type on mismatch. */
+function validateTables(
+  tableNames: string[],
+  schema: DbSchema,
+  errorType: ErrorType,
+): void {
+  for (const tableName of tableNames) {
+    const key = resolveTableKey(tableName, schema);
+    if (!key) {
+      throw new AppError(errorType, `Table "${tableName}" does not exist in the database schema`);
+    }
+  }
+}
+
+/** Validate SELECT column refs against the schema. */
+function validateSelectColumns(
+  selectAst: Select,
+  tableNames: string[],
+  schema: DbSchema,
+  errorType: ErrorType,
+): void {
+  const columnRefs = extractColumnNames(selectAst);
+  for (const { table: refTable, column: colName } of columnRefs) {
+    if (refTable) {
+      const key = resolveTableKey(refTable, schema);
+      if (!key) {
+        throw new AppError(
+          errorType,
+          `Table "${refTable}" referenced in column "${refTable}.${colName}" does not exist in the schema`,
+        );
+      }
+      const tableInfo = schema.get(key)!;
+      if (!tableInfo.columns.has(colName)) {
+        throw new AppError(errorType, `Column "${colName}" does not exist in table "${refTable}"`);
+      }
+    } else {
+      if (tableNames.length > 0) {
+        const existsInAny = tableNames.some((tbl) => {
+          const key = resolveTableKey(tbl, schema);
+          if (!key) return false;
+          return schema.get(key)!.columns.has(colName);
+        });
+        if (!existsInAny) {
+          throw new AppError(
+            errorType,
+            `Column "${colName}" does not exist in any of the queried tables`,
+          );
+        }
+      }
+    }
+  }
+}
+
+/** Validate INSERT columns against the schema. */
+function validateInsertColumns(
+  stmt: AST,
+  schema: DbSchema,
+): void {
+  const ins = stmt as unknown as {
+    table: Array<{ table: string }>;
+    columns: string[] | null;
+  };
+
+  const tableName = ins.table?.[0]?.table;
+  if (!tableName) return;
+
+  const key = resolveTableKey(tableName, schema);
+  if (!key) {
+    throw new AppError(
+      ErrorType.SCHEMA_VIOLATION,
+      `Table "${tableName}" does not exist in the database schema`,
+    );
+  }
+
+  const tableInfo = schema.get(key)!;
+  const insertCols = ins.columns;
+
+  if (Array.isArray(insertCols)) {
+    for (const col of insertCols) {
+      if (!tableInfo.columns.has(col)) {
+        throw new AppError(
+          ErrorType.SCHEMA_VIOLATION,
+          `Column "${col}" does not exist in table "${tableName}"`,
+        );
+      }
+    }
+  }
+}
+
+/** Validate UPDATE table against the schema and enforce WHERE. */
+function validateUpdate(stmt: AST, schema: DbSchema): void {
+  const upd = stmt as unknown as {
+    table: Array<{ table: string }>;
+    where: unknown;
+  };
+
+  if (!upd.where) {
+    throw new AppError(
+      ErrorType.MISSING_WHERE_CLAUSE,
+      'UPDATE statement must include a WHERE clause to prevent unintended full-table updates',
+    );
+  }
+
+  const tableName = upd.table?.[0]?.table;
+  if (tableName) {
+    const key = resolveTableKey(tableName, schema);
+    if (!key) {
+      throw new AppError(
+        ErrorType.SCHEMA_VIOLATION,
+        `Table "${tableName}" does not exist in the database schema`,
+      );
+    }
+  }
+}
+
+/** Validate DELETE table against the schema and enforce WHERE. */
+function validateDelete(stmt: AST, schema: DbSchema): void {
+  const del = stmt as unknown as {
+    from: Array<{ table: string }>;
+    where: unknown;
+  };
+
+  if (!del.where) {
+    throw new AppError(
+      ErrorType.MISSING_WHERE_CLAUSE,
+      'DELETE statement must include a WHERE clause to prevent unintended full-table deletions',
+    );
+  }
+
+  const tableName = del.from?.[0]?.table;
+  if (tableName) {
+    const key = resolveTableKey(tableName, schema);
+    if (!key) {
+      throw new AppError(
+        ErrorType.SCHEMA_VIOLATION,
+        `Table "${tableName}" does not exist in the database schema`,
+      );
+    }
+  }
+}
+
+/**
+ * Build a preview SELECT query from a validated UPDATE or DELETE statement.
+ * The result is a `SELECT * FROM <table> WHERE <condition> LIMIT 10` query
+ * that can be executed as a dry-run to show what would be affected.
+ */
+export function buildPreviewSql(validatedSql: string): string {
+  let ast: AST | AST[];
+
+  try {
+    ast = parser.astify(validatedSql, { database: 'PostgreSQL' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`buildPreviewSql: failed to parse SQL: ${msg}`);
+  }
+
+  const stmt = Array.isArray(ast) ? ast[0] : ast;
+  if (!stmt) throw new Error('buildPreviewSql: no AST produced');
+
+  const stmtType = stmt.type?.toLowerCase();
+
+  if (stmtType === 'delete') {
+    const del = stmt as unknown as { from: Array<{ table: string }>; where: unknown };
+    const tableName = del.from?.[0]?.table;
+    if (!tableName) throw new Error('buildPreviewSql: could not extract table from DELETE');
+
+    const selectAst = {
+      type: 'select',
+      columns: '*',
+      from: [{ table: tableName, db: null, as: null }],
+      where: del.where ?? null,
+      limit: { seperator: '', value: [{ type: 'number', value: 10 }] },
+    };
+    return parser.sqlify(selectAst as unknown as AST, { database: 'PostgreSQL' });
+  }
+
+  if (stmtType === 'update') {
+    const upd = stmt as unknown as { table: Array<{ table: string }>; where: unknown };
+    const tableName = upd.table?.[0]?.table;
+    if (!tableName) throw new Error('buildPreviewSql: could not extract table from UPDATE');
+
+    const selectAst = {
+      type: 'select',
+      columns: '*',
+      from: [{ table: tableName, db: null, as: null }],
+      where: upd.where ?? null,
+      limit: { seperator: '', value: [{ type: 'number', value: 10 }] },
+    };
+    return parser.sqlify(selectAst as unknown as AST, { database: 'PostgreSQL' });
+  }
+
+  throw new Error(`buildPreviewSql: expected UPDATE or DELETE statement, got "${stmtType}"`);
+}
+
 /**
  * Parse, validate, and normalize a SQL string.
  *
- * - Asserts that exactly one SELECT statement is present.
- * - Validates all referenced tables against the DbSchema whitelist.
- * - Validates explicitly named columns against the DbSchema whitelist.
- * - Injects LIMIT if absent.
- * - Returns the normalized SQL string.
+ * In READ_ONLY mode (default):
+ * - Only SELECT is allowed; anything else throws WRITE_NOT_ALLOWED.
+ * - Unknown tables/columns throw SCHEMA_MISMATCH.
+ * - LIMIT is injected if absent.
  *
+ * In CRUD_ENABLED mode:
+ * - SELECT, INSERT, UPDATE, DELETE are allowed.
+ * - DDL (DROP, ALTER, TRUNCATE, etc.) throws WRITE_NOT_ALLOWED.
+ * - UPDATE/DELETE without WHERE throws MISSING_WHERE_CLAUSE.
+ * - Unknown tables/columns throw SCHEMA_VIOLATION.
+ * - SELECT auto-injects LIMIT.
+ *
+ * Returns a SqlValidationResult with the normalized SQL and statementType.
  * Throws AppError on any violation.
  */
-export function validateSql(rawSql: string, schema: DbSchema): string {
+export function validateSql(
+  rawSql: string,
+  schema: DbSchema,
+  mode: QueryMode = 'READ_ONLY',
+): SqlValidationResult {
   let ast: AST | AST[];
 
   try {
@@ -120,7 +318,6 @@ export function validateSql(rawSql: string, schema: DbSchema): string {
     throw new AppError(ErrorType.INVALID_SQL, `SQL parse error: ${msg}`);
   }
 
-  // Normalize to array and reject multi-statement SQL
   const statements = Array.isArray(ast) ? ast : [ast];
 
   if (statements.length === 0) {
@@ -137,76 +334,60 @@ export function validateSql(rawSql: string, schema: DbSchema): string {
   const stmt = statements[0]!;
   const stmtType = stmt.type?.toLowerCase() ?? '';
 
-  if (BLOCKED_STATEMENT_TYPES.has(stmtType)) {
+  // DDL is always blocked regardless of mode
+  if (DDL_BLOCKED.has(stmtType)) {
     throw new AppError(
-      ErrorType.INVALID_SQL,
-      `Statement type "${stmtType.toUpperCase()}" is not allowed. Only SELECT queries are permitted.`,
+      ErrorType.WRITE_NOT_ALLOWED,
+      `Statement type "${stmtType.toUpperCase()}" is not allowed`,
     );
   }
 
-  if (!ALLOWED_STATEMENT_TYPES.has(stmtType)) {
-    throw new AppError(
-      ErrorType.INVALID_SQL,
-      `Unrecognized or disallowed statement type: "${stmtType}"`,
-    );
-  }
-
-  const selectAst = stmt as Select;
-
-  // Validate table references
-  const tableNames = extractTableNames(selectAst);
-  for (const tableName of tableNames) {
-    const key = resolveTableKey(tableName, schema);
-    if (!key) {
+  if (mode === 'READ_ONLY') {
+    if (stmtType !== 'select') {
       throw new AppError(
-        ErrorType.SCHEMA_MISMATCH,
-        `Table "${tableName}" does not exist in the database schema`,
+        ErrorType.WRITE_NOT_ALLOWED,
+        `Statement type "${stmtType.toUpperCase()}" is not allowed in READ_ONLY mode. Only SELECT queries are permitted.`,
+      );
+    }
+  } else {
+    // CRUD_ENABLED: allow SELECT + write types, reject anything else
+    if (stmtType !== 'select' && !CRUD_WRITE_TYPES.has(stmtType)) {
+      throw new AppError(
+        ErrorType.WRITE_NOT_ALLOWED,
+        `Unrecognized or disallowed statement type: "${stmtType}"`,
       );
     }
   }
 
-  // Validate column references (skip wildcards, expressions, aggregates)
-  const columnRefs = extractColumnNames(selectAst);
-  for (const { table: refTable, column: colName } of columnRefs) {
-    if (refTable) {
-      // Column qualified with a table name — look up that specific table
-      const key = resolveTableKey(refTable, schema);
-      if (!key) {
-        throw new AppError(
-          ErrorType.SCHEMA_MISMATCH,
-          `Table "${refTable}" referenced in column "${refTable}.${colName}" does not exist in the schema`,
-        );
-      }
-      const tableInfo = schema.get(key)!;
-      if (!tableInfo.columns.has(colName)) {
-        throw new AppError(
-          ErrorType.SCHEMA_MISMATCH,
-          `Column "${colName}" does not exist in table "${refTable}"`,
-        );
-      }
-    } else {
-      // Unqualified column — check that it exists in at least one of the queried tables
-      if (tableNames.length > 0) {
-        const existsInAny = tableNames.some((tbl) => {
-          const key = resolveTableKey(tbl, schema);
-          if (!key) return false;
-          return schema.get(key)!.columns.has(colName);
-        });
-        if (!existsInAny) {
-          throw new AppError(
-            ErrorType.SCHEMA_MISMATCH,
-            `Column "${colName}" does not exist in any of the queried tables`,
-          );
-        }
-      }
-    }
+  // ── Mode-specific validation ──────────────────────────────────────────────
+
+  if (stmtType === 'select') {
+    const selectAst = stmt as Select;
+    const tableNames = extractTableNames(selectAst);
+    validateTables(tableNames, schema, ErrorType.SCHEMA_MISMATCH);
+    validateSelectColumns(selectAst, tableNames, schema, ErrorType.SCHEMA_MISMATCH);
+    injectLimit(selectAst, config.query.maxRows);
+    const sql = parser.sqlify(selectAst, { database: 'PostgreSQL' });
+    return { sql, statementType: 'SELECT' };
   }
 
-  // Inject LIMIT if missing
-  injectLimit(selectAst, config.query.maxRows);
+  if (stmtType === 'insert') {
+    validateInsertColumns(stmt, schema);
+    const sql = parser.sqlify(stmt, { database: 'PostgreSQL' });
+    return { sql, statementType: 'INSERT' };
+  }
 
-  // Re-serialize the AST back to SQL
-  const normalizedSql = parser.sqlify(selectAst, { database: 'PostgreSQL' });
+  if (stmtType === 'update') {
+    validateUpdate(stmt, schema);
+    const sql = parser.sqlify(stmt, { database: 'PostgreSQL' });
+    return { sql, statementType: 'UPDATE' };
+  }
 
-  return normalizedSql;
+  if (stmtType === 'delete') {
+    validateDelete(stmt, schema);
+    const sql = parser.sqlify(stmt, { database: 'PostgreSQL' });
+    return { sql, statementType: 'DELETE' };
+  }
+
+  throw new AppError(ErrorType.INVALID_SQL, `Unrecognized statement type: "${stmtType}"`);
 }
