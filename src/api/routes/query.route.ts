@@ -5,6 +5,7 @@ import { validateSql } from '../../validation/sqlValidator';
 import { executeQuery } from '../../execution/queryExecutor';
 import { getCachedResult, setCachedResult } from '../../cache/cacheService';
 import { getSchema, getSchemaVersion, refreshSchemaFromDb } from '../../schema/schemaService';
+import { formatSql } from '../../utils/sqlFormatter';
 import type { QueryRequest, QueryResponse } from '../../types/api';
 import { getPool } from '../../execution/queryExecutor';
 import type { Redis } from 'ioredis';
@@ -89,7 +90,10 @@ export async function queryRoutes(
       request.log.info({ rawSql }, 'Validating generated SQL');
       const validatedSql = validateSql(rawSql, schema);
 
-      // 5. Execute query
+      // 5. Format SQL for human-readable response (execution uses unformatted — same semantics)
+      const formattedSql = formatSql(validatedSql);
+
+      // 6. Execute query
       request.log.info({ sql: validatedSql }, 'Executing validated SQL');
       const { rows, rowCount } = await executeQuery(validatedSql);
 
@@ -97,12 +101,12 @@ export async function queryRoutes(
         request.log.info('Query returned no rows');
       }
 
-      // 6. Explain SQL
+      // 7. Explain SQL
       const explanation = await explainSql(validatedSql);
 
-      // 7. Build response
+      // 8. Build response
       const result: QueryResponse = {
-        query: validatedSql,
+        query: formattedSql,
         explanation,
         data: rows,
         row_count: rowCount,

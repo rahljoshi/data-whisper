@@ -15,9 +15,15 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
-    "roots": ["<rootDir>/src"],
-    "testMatch": ["**/*.test.ts"],
-    "setupFiles": ["<rootDir>/src/__test-setup__.ts"],
+    "roots": [
+      "<rootDir>/src"
+    ],
+    "testMatch": [
+      "**/*.test.ts"
+    ],
+    "setupFiles": [
+      "<rootDir>/src/__test-setup__.ts"
+    ],
     "collectCoverageFrom": [
       "src/**/*.ts",
       "!src/server.ts",
@@ -39,6 +45,7 @@
     "openai": "^4.47.1",
     "pg": "^8.11.5",
     "pino": "^9.1.0",
+    "sql-formatter": "^15.7.2",
     "zod": "^3.23.8"
   },
   "devDependencies": {
