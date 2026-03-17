@@ -172,3 +172,78 @@ describe('generateSql — OpenAI errors', () => {
     }
   });
 });
+
+// ── READ_ONLY mode ────────────────────────────────────────────────────────────
+
+describe('generateSql — READ_ONLY mode', () => {
+  it('sends a system prompt that enforces SELECT-only in READ_ONLY mode', async () => {
+    const mockCreate = mockOpenAIResponse('SELECT * FROM users LIMIT 100');
+
+    const schema = makeSchema();
+    await generateSql('show all users', schema, 'READ_ONLY');
+
+    const calls = mockCreate.mock.calls;
+    expect(calls.length).toBe(1);
+    const systemMessage = (calls[0] as { messages: Array<{ role: string; content: string }> }[])[0].messages[0].content as string;
+    expect(systemMessage.toLowerCase()).toContain('select');
+    expect(systemMessage).toMatch(/never.*insert|never.*update|never.*delete/i);
+  });
+
+  it('defaults to READ_ONLY when mode is omitted', async () => {
+    const mockCreate = mockOpenAIResponse('SELECT * FROM users LIMIT 100');
+
+    const schema = makeSchema();
+    const result = await generateSql('show all users', schema);
+
+    expect(result).toBe('SELECT * FROM users LIMIT 100');
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── CRUD_ENABLED mode ─────────────────────────────────────────────────────────
+
+describe('generateSql — CRUD_ENABLED mode', () => {
+  it('sends a system prompt that allows INSERT, UPDATE, DELETE in CRUD_ENABLED mode', async () => {
+    const mockCreate = mockOpenAIResponse("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')");
+
+    const schema = makeSchema();
+    await generateSql('add a user named Alice', schema, 'CRUD_ENABLED');
+
+    const calls = mockCreate.mock.calls;
+    expect(calls.length).toBe(1);
+    const systemMessage = (calls[0] as { messages: Array<{ role: string; content: string }> }[])[0].messages[0].content as string;
+    expect(systemMessage).toMatch(/insert|update|delete/i);
+    expect(systemMessage).toMatch(/never.*drop|never.*alter|never.*truncate/i);
+  });
+
+  it('returns the SQL from the LLM in CRUD_ENABLED mode', async () => {
+    mockOpenAIResponse("DELETE FROM users WHERE id = 1");
+
+    const schema = makeSchema();
+    const result = await generateSql('delete user with id 1', schema, 'CRUD_ENABLED');
+
+    expect(result).toBe('DELETE FROM users WHERE id = 1');
+  });
+
+  it('still handles CANNOT_ANSWER in CRUD_ENABLED mode', async () => {
+    mockOpenAIResponse('CANNOT_ANSWER');
+
+    const schema = makeSchema();
+
+    expect.assertions(1);
+    try {
+      await generateSql('what is the stock price of Apple?', schema, 'CRUD_ENABLED');
+    } catch (err) {
+      expect((err as AppError).type).toBe(ErrorType.AMBIGUOUS_QUERY);
+    }
+  });
+
+  it('still strips code fences in CRUD_ENABLED mode', async () => {
+    mockOpenAIResponse('```sql\nUPDATE users SET name = \'Bob\' WHERE id = 1\n```');
+
+    const schema = makeSchema();
+    const result = await generateSql('rename user 1 to Bob', schema, 'CRUD_ENABLED');
+
+    expect(result).toBe("UPDATE users SET name = 'Bob' WHERE id = 1");
+  });
+});
