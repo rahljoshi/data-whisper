@@ -1,6 +1,7 @@
 /**
- * Route tests for POST /api/query.
+ * Route tests for POST /api/query and POST /api/query/confirm.
  * All external modules are mocked at the boundary.
+ * mode is read from config (service-level), not the request body.
  */
 
 jest.mock('../../ai/sqlGenerator');
@@ -10,6 +11,21 @@ jest.mock('../../execution/queryExecutor');
 jest.mock('../../cache/cacheService');
 jest.mock('../../schema/schemaService');
 jest.mock('../../utils/sqlFormatter');
+jest.mock('../../cache/pendingWriteStore');
+jest.mock('../../config', () => ({
+  config: {
+    query: {
+      mode: 'READ_ONLY',
+      timeoutMs: 5000,
+      maxRows: 100,
+      cacheTtlSeconds: 3600,
+      schemaRefreshIntervalMs: 600000,
+      pendingWriteTtlSeconds: 300,
+    },
+    security: { maxQuestionLength: 2000, sensitiveColumnPatterns: [] },
+    rateLimit: { max: 60, windowMs: 60000 },
+  },
+}));
 
 import Fastify from 'fastify';
 import { queryRoutes } from './query.route';
@@ -20,10 +36,14 @@ import { executeQuery } from '../../execution/queryExecutor';
 import { getCachedResult, setCachedResult } from '../../cache/cacheService';
 import { getSchema, getSchemaVersion } from '../../schema/schemaService';
 import { formatSql } from '../../utils/sqlFormatter';
+import { storePendingWrite, getPendingWrite } from '../../cache/pendingWriteStore';
+import { config } from '../../config';
 import type { DbSchema } from '../../types/schema';
+import type { PendingWrite } from '../../cache/pendingWriteStore';
 
 // ── Typed mock helpers ────────────────────────────────────────────────────────
 
+const mockConfig = config as { query: { mode: string } };
 const mockGenerateSql = generateSql as jest.MockedFunction<typeof generateSql>;
 const mockExplainSql = explainSql as jest.MockedFunction<typeof explainSql>;
 const mockValidateSql = validateSql as jest.MockedFunction<typeof validateSql>;
@@ -34,6 +54,8 @@ const mockSetCachedResult = setCachedResult as jest.MockedFunction<typeof setCac
 const mockGetSchema = getSchema as jest.MockedFunction<typeof getSchema>;
 const mockGetSchemaVersion = getSchemaVersion as jest.MockedFunction<typeof getSchemaVersion>;
 const mockFormatSql = formatSql as jest.MockedFunction<typeof formatSql>;
+const mockStorePendingWrite = storePendingWrite as jest.MockedFunction<typeof storePendingWrite>;
+const mockGetPendingWrite = getPendingWrite as jest.MockedFunction<typeof getPendingWrite>;
 
 // ── Test setup ────────────────────────────────────────────────────────────────
 
@@ -48,37 +70,20 @@ const fakeSchema = new Map() as DbSchema;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockConfig.query.mode = 'READ_ONLY';
   mockGetSchema.mockReturnValue(fakeSchema);
   mockGetSchemaVersion.mockReturnValue('v1');
   mockGetCachedResult.mockResolvedValue(null);
   mockSetCachedResult.mockResolvedValue(undefined);
   mockFormatSql.mockImplementation((sql) => sql);
   mockExplainSql.mockResolvedValue('Returns all users');
+  mockStorePendingWrite.mockResolvedValue('test-token-123');
 });
 
-// ── READ_ONLY SELECT ──────────────────────────────────────────────────────────
+// ── Request body: only query field ───────────────────────────────────────────
 
-describe('POST /api/query — READ_ONLY SELECT', () => {
-  it('executes a SELECT and returns type: READ', async () => {
-    mockGenerateSql.mockResolvedValue('SELECT * FROM users LIMIT 100');
-    mockValidateSql.mockReturnValue({ sql: 'SELECT * FROM users LIMIT 100', statementType: 'SELECT' });
-    mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
-
-    const app = await buildApp();
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/query',
-      payload: { query: 'show all users' },
-    });
-
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body) as { type: string; row_count: number };
-    expect(body.type).toBe('READ');
-    expect(body.row_count).toBe(1);
-    await app.close();
-  });
-
-  it('defaults to READ_ONLY mode when mode is omitted', async () => {
+describe('POST /api/query — request body shape', () => {
+  it('accepts a request with only { query }', async () => {
     mockGenerateSql.mockResolvedValue('SELECT * FROM users LIMIT 100');
     mockValidateSql.mockReturnValue({ sql: 'SELECT * FROM users LIMIT 100', statementType: 'SELECT' });
     mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 0 });
@@ -91,44 +96,86 @@ describe('POST /api/query — READ_ONLY SELECT', () => {
     });
 
     expect(response.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('ignores mode or confirm_write if accidentally included in the body', async () => {
+    // Fastify strips unknown fields (additionalProperties: false = removeAdditional).
+    // The route must use config.query.mode, not any body field.
+    mockGenerateSql.mockResolvedValue('SELECT * FROM users LIMIT 100');
+    mockValidateSql.mockReturnValue({ sql: 'SELECT * FROM users LIMIT 100', statementType: 'SELECT' });
+    mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+
+    const app = await buildApp();
+    await app.inject({
+      method: 'POST',
+      url: '/api/query',
+      payload: { query: 'show all users', mode: 'CRUD_ENABLED' },
+    });
+
+    // Mode must come from config (READ_ONLY), not the body field
     expect(mockGenerateSql).toHaveBeenCalledWith('show all users', fakeSchema, 'READ_ONLY');
     await app.close();
   });
 
-  it('includes query, explanation, data, row_count in response', async () => {
+  it('returns 400 when query field is missing', async () => {
+    const app = await buildApp();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/query',
+      payload: {},
+    });
+    expect(response.statusCode).toBe(400);
+    await app.close();
+  });
+});
+
+// ── READ_ONLY SELECT (mode from config) ──────────────────────────────────────
+
+describe('POST /api/query — READ_ONLY SELECT (config-driven)', () => {
+  it('reads mode from config, not the request body', async () => {
     mockGenerateSql.mockResolvedValue('SELECT * FROM users LIMIT 100');
     mockValidateSql.mockReturnValue({ sql: 'SELECT * FROM users LIMIT 100', statementType: 'SELECT' });
-    mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1, name: 'Alice' }], rowCount: 1 });
-    mockExplainSql.mockResolvedValue('Selects all users');
-    mockFormatSql.mockReturnValue('SELECT *\nFROM users\nLIMIT 100');
+    mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
+
+    const app = await buildApp();
+    await app.inject({
+      method: 'POST',
+      url: '/api/query',
+      payload: { query: 'show all users' },
+    });
+
+    expect(mockGenerateSql).toHaveBeenCalledWith('show all users', fakeSchema, 'READ_ONLY');
+    await app.close();
+  });
+
+  it('returns type: READ on SELECT', async () => {
+    mockGenerateSql.mockResolvedValue('SELECT * FROM users LIMIT 100');
+    mockValidateSql.mockReturnValue({ sql: 'SELECT * FROM users LIMIT 100', statementType: 'SELECT' });
+    mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
 
     const app = await buildApp();
     const response = await app.inject({
       method: 'POST',
       url: '/api/query',
-      payload: { query: 'show all users', mode: 'READ_ONLY' },
+      payload: { query: 'show all users' },
     });
 
-    const body = JSON.parse(response.body) as {
-      query: string;
-      explanation: string;
-      data: unknown[];
-      row_count: number;
-      type: string;
-    };
-    expect(body.query).toBe('SELECT *\nFROM users\nLIMIT 100');
-    expect(body.explanation).toBe('Selects all users');
-    expect(body.data).toHaveLength(1);
-    expect(body.row_count).toBe(1);
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body) as { type: string };
     expect(body.type).toBe('READ');
     await app.close();
   });
 });
 
-// ── CRUD INSERT ───────────────────────────────────────────────────────────────
+// ── CRUD_ENABLED INSERT (mode from config) ────────────────────────────────────
 
 describe('POST /api/query — CRUD_ENABLED INSERT', () => {
-  it('executes INSERT directly and returns type: WRITE with affected_rows', async () => {
+  beforeEach(() => {
+    mockConfig.query.mode = 'CRUD_ENABLED';
+  });
+
+  it('executes INSERT directly and returns type: WRITE', async () => {
     const insertSql = "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')";
     mockGenerateSql.mockResolvedValue(insertSql);
     mockValidateSql.mockReturnValue({ sql: insertSql, statementType: 'INSERT' });
@@ -138,7 +185,7 @@ describe('POST /api/query — CRUD_ENABLED INSERT', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/query',
-      payload: { query: 'add user Alice', mode: 'CRUD_ENABLED' },
+      payload: { query: 'add user Alice' },
     });
 
     expect(response.statusCode).toBe(200);
@@ -148,30 +195,34 @@ describe('POST /api/query — CRUD_ENABLED INSERT', () => {
     await app.close();
   });
 
-  it('does not require confirm_write for INSERT', async () => {
-    const insertSql = "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')";
-    mockGenerateSql.mockResolvedValue(insertSql);
-    mockValidateSql.mockReturnValue({ sql: insertSql, statementType: 'INSERT' });
+  it('passes CRUD_ENABLED mode to generateSql', async () => {
+    mockGenerateSql.mockResolvedValue("INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')");
+    mockValidateSql.mockReturnValue({
+      sql: "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')",
+      statementType: 'INSERT',
+    });
     mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 1 });
 
     const app = await buildApp();
-    const response = await app.inject({
+    await app.inject({
       method: 'POST',
       url: '/api/query',
-      payload: { query: 'add user Bob', mode: 'CRUD_ENABLED', confirm_write: false },
+      payload: { query: 'add user Bob' },
     });
 
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body) as { type: string };
-    expect(body.type).toBe('WRITE');
+    expect(mockGenerateSql).toHaveBeenCalledWith('add user Bob', fakeSchema, 'CRUD_ENABLED');
     await app.close();
   });
 });
 
-// ── CRUD DELETE confirmation flow ─────────────────────────────────────────────
+// ── CRUD_ENABLED DELETE — confirmation flow ───────────────────────────────────
 
-describe('POST /api/query — CRUD_ENABLED DELETE confirmation', () => {
-  it('returns AWAITING_CONFIRMATION when confirm_write is missing', async () => {
+describe('POST /api/query — CRUD_ENABLED DELETE returns AWAITING_CONFIRMATION', () => {
+  beforeEach(() => {
+    mockConfig.query.mode = 'CRUD_ENABLED';
+  });
+
+  it('returns AWAITING_CONFIRMATION with confirmation_token', async () => {
     const deleteSql = "DELETE FROM users WHERE name = 'Rahul'";
     mockGenerateSql.mockResolvedValue(deleteSql);
     mockValidateSql.mockReturnValue({ sql: deleteSql, statementType: 'DELETE' });
@@ -183,13 +234,13 @@ describe('POST /api/query — CRUD_ENABLED DELETE confirmation', () => {
       ],
       rowCount: 2,
     });
-    mockExplainSql.mockResolvedValue("Deletes all users named Rahul");
+    mockStorePendingWrite.mockResolvedValue('abc-token-123');
 
     const app = await buildApp();
     const response = await app.inject({
       method: 'POST',
       url: '/api/query',
-      payload: { query: 'delete all users named Rahul', mode: 'CRUD_ENABLED' },
+      payload: { query: 'delete all users named Rahul' },
     });
 
     expect(response.statusCode).toBe(200);
@@ -197,87 +248,70 @@ describe('POST /api/query — CRUD_ENABLED DELETE confirmation', () => {
       status: string;
       type: string;
       operation: string;
+      confirmation_token: string;
       impact: { affected_rows: number; preview: unknown[]; warning: string };
       confirm_to_proceed: string;
     };
     expect(body.status).toBe('AWAITING_CONFIRMATION');
     expect(body.type).toBe('WRITE');
     expect(body.operation).toBe('DELETE');
+    expect(body.confirmation_token).toBe('abc-token-123');
     expect(body.impact.affected_rows).toBe(2);
     expect(body.impact.preview).toHaveLength(2);
     expect(body.impact.warning).toContain('cannot be undone');
-    expect(body.confirm_to_proceed).toContain('confirm_write: true');
+    expect(body.confirm_to_proceed).toContain('/api/query/confirm');
     await app.close();
   });
 
-  it('returns AWAITING_CONFIRMATION when confirm_write is false', async () => {
+  it('stores the pending write in the store', async () => {
     const deleteSql = 'DELETE FROM users WHERE id = 1';
     mockGenerateSql.mockResolvedValue(deleteSql);
     mockValidateSql.mockReturnValue({ sql: deleteSql, statementType: 'DELETE' });
     mockBuildPreviewSql.mockReturnValue('SELECT * FROM users WHERE id = 1 LIMIT 10');
-    mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1, name: 'Alice' }], rowCount: 1 });
+    mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
 
     const app = await buildApp();
-    const response = await app.inject({
+    await app.inject({
       method: 'POST',
       url: '/api/query',
-      payload: { query: 'delete user 1', mode: 'CRUD_ENABLED', confirm_write: false },
+      payload: { query: 'delete user 1' },
     });
 
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body) as { status: string };
-    expect(body.status).toBe('AWAITING_CONFIRMATION');
+    expect(mockStorePendingWrite).toHaveBeenCalledTimes(1);
+    const [, pendingArg] = mockStorePendingWrite.mock.calls[0] as [unknown, PendingWrite, number];
+    expect(pendingArg.sql).toBe(deleteSql);
+    expect(pendingArg.operation).toBe('DELETE');
     await app.close();
   });
 
-  it('executes DELETE when confirm_write is true and returns type: WRITE', async () => {
-    const deleteSql = 'DELETE FROM users WHERE id = 1';
-    mockGenerateSql.mockResolvedValue(deleteSql);
-    mockValidateSql.mockReturnValue({ sql: deleteSql, statementType: 'DELETE' });
-    mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 1 });
+  it('does not execute the write SQL, only the preview SELECT', async () => {
+    mockGenerateSql.mockResolvedValue('DELETE FROM users WHERE id = 1');
+    mockValidateSql.mockReturnValue({ sql: 'DELETE FROM users WHERE id = 1', statementType: 'DELETE' });
+    mockBuildPreviewSql.mockReturnValue('SELECT * FROM users WHERE id = 1 LIMIT 10');
+    mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
 
     const app = await buildApp();
-    const response = await app.inject({
+    await app.inject({
       method: 'POST',
       url: '/api/query',
-      payload: { query: 'delete user 1', mode: 'CRUD_ENABLED', confirm_write: true },
+      payload: { query: 'delete user 1' },
     });
 
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body) as { type: string; affected_rows: number };
-    expect(body.type).toBe('WRITE');
-    expect(body.affected_rows).toBe(1);
-    await app.close();
-  });
-
-  it('caps preview at 10 rows even when more are returned', async () => {
-    const deleteSql = 'DELETE FROM users WHERE active = false';
-    mockGenerateSql.mockResolvedValue(deleteSql);
-    mockValidateSql.mockReturnValue({ sql: deleteSql, statementType: 'DELETE' });
-    mockBuildPreviewSql.mockReturnValue('SELECT * FROM users WHERE active = false LIMIT 10');
-    const manyRows = Array.from({ length: 10 }, (_, i) => ({ id: i + 1, name: `User${i + 1}` }));
-    mockExecuteQuery.mockResolvedValue({ rows: manyRows, rowCount: 50 });
-
-    const app = await buildApp();
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/query',
-      payload: { query: 'delete inactive users', mode: 'CRUD_ENABLED' },
-    });
-
-    const body = JSON.parse(response.body) as {
-      impact: { affected_rows: number; preview: unknown[] };
-    };
-    expect(body.impact.preview.length).toBeLessThanOrEqual(10);
-    expect(body.impact.affected_rows).toBe(50);
+    // executeQuery called once — only the preview SELECT, not the DELETE
+    expect(mockExecuteQuery).toHaveBeenCalledTimes(1);
+    expect(mockExecuteQuery).toHaveBeenCalledWith('SELECT * FROM users WHERE id = 1 LIMIT 10');
     await app.close();
   });
 });
 
-// ── CRUD UPDATE confirmation flow ─────────────────────────────────────────────
+// ── CRUD_ENABLED UPDATE — confirmation flow ───────────────────────────────────
 
-describe('POST /api/query — CRUD_ENABLED UPDATE confirmation', () => {
-  it('returns AWAITING_CONFIRMATION for UPDATE without confirm_write', async () => {
+describe('POST /api/query — CRUD_ENABLED UPDATE returns AWAITING_CONFIRMATION', () => {
+  beforeEach(() => {
+    mockConfig.query.mode = 'CRUD_ENABLED';
+  });
+
+  it('returns AWAITING_CONFIRMATION with UPDATE warning', async () => {
     const updateSql = "UPDATE users SET email = 'new@test.com' WHERE id = 1";
     mockGenerateSql.mockResolvedValue(updateSql);
     mockValidateSql.mockReturnValue({ sql: updateSql, statementType: 'UPDATE' });
@@ -288,10 +322,9 @@ describe('POST /api/query — CRUD_ENABLED UPDATE confirmation', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/query',
-      payload: { query: "change user 1 email to new@test.com", mode: 'CRUD_ENABLED' },
+      payload: { query: 'change email of user 1' },
     });
 
-    expect(response.statusCode).toBe(200);
     const body = JSON.parse(response.body) as {
       status: string;
       operation: string;
@@ -302,24 +335,88 @@ describe('POST /api/query — CRUD_ENABLED UPDATE confirmation', () => {
     expect(body.impact.warning).toContain('modify');
     await app.close();
   });
+});
 
-  it('executes UPDATE when confirm_write is true', async () => {
-    const updateSql = "UPDATE users SET email = 'new@test.com' WHERE id = 1";
-    mockGenerateSql.mockResolvedValue(updateSql);
-    mockValidateSql.mockReturnValue({ sql: updateSql, statementType: 'UPDATE' });
+// ── POST /api/query/confirm ───────────────────────────────────────────────────
+
+describe('POST /api/query/confirm', () => {
+  it('executes the pending write and returns type: WRITE', async () => {
+    const pending: PendingWrite = {
+      sql: 'DELETE FROM users WHERE id = 1',
+      formattedSql: 'DELETE FROM users\nWHERE id = 1',
+      explanation: 'Deletes user with id 1',
+      operation: 'DELETE',
+    };
+    mockGetPendingWrite.mockResolvedValue(pending);
     mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 1 });
 
     const app = await buildApp();
     const response = await app.inject({
       method: 'POST',
-      url: '/api/query',
-      payload: { query: "change user 1 email", mode: 'CRUD_ENABLED', confirm_write: true },
+      url: '/api/query/confirm',
+      payload: { token: 'abc-123' },
     });
 
     expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body) as { type: string; affected_rows: number };
+    const body = JSON.parse(response.body) as {
+      type: string;
+      affected_rows: number;
+      query: string;
+      explanation: string;
+    };
     expect(body.type).toBe('WRITE');
     expect(body.affected_rows).toBe(1);
+    expect(body.query).toBe('DELETE FROM users\nWHERE id = 1');
+    expect(body.explanation).toBe('Deletes user with id 1');
+    await app.close();
+  });
+
+  it('returns 404 when token is not found or expired', async () => {
+    mockGetPendingWrite.mockResolvedValue(null);
+
+    const app = await buildApp();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/query/confirm',
+      payload: { token: 'expired-or-unknown' },
+    });
+
+    expect(response.statusCode).toBe(404);
+    const body = JSON.parse(response.body) as { error: { type: string } };
+    expect(body.error.type).toBe('TOKEN_NOT_FOUND');
+    await app.close();
+  });
+
+  it('returns 400 when token field is missing', async () => {
+    const app = await buildApp();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/query/confirm',
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('executes the SQL stored in the pending write', async () => {
+    const pending: PendingWrite = {
+      sql: "UPDATE users SET email = 'new@test.com' WHERE id = 5",
+      formattedSql: "UPDATE users\nSET email = 'new@test.com'\nWHERE id = 5",
+      explanation: 'Updates email of user 5',
+      operation: 'UPDATE',
+    };
+    mockGetPendingWrite.mockResolvedValue(pending);
+    mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 1 });
+
+    const app = await buildApp();
+    await app.inject({
+      method: 'POST',
+      url: '/api/query/confirm',
+      payload: { token: 'some-token' },
+    });
+
+    expect(mockExecuteQuery).toHaveBeenCalledWith(pending.sql);
     await app.close();
   });
 });
@@ -328,6 +425,7 @@ describe('POST /api/query — CRUD_ENABLED UPDATE confirmation', () => {
 
 describe('POST /api/query — cache behaviour', () => {
   it('does not cache WRITE operations', async () => {
+    mockConfig.query.mode = 'CRUD_ENABLED';
     const insertSql = "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')";
     mockGenerateSql.mockResolvedValue(insertSql);
     mockValidateSql.mockReturnValue({ sql: insertSql, statementType: 'INSERT' });
@@ -337,25 +435,10 @@ describe('POST /api/query — cache behaviour', () => {
     await app.inject({
       method: 'POST',
       url: '/api/query',
-      payload: { query: 'add user Alice', mode: 'CRUD_ENABLED' },
+      payload: { query: 'add user Alice' },
     });
 
     expect(mockSetCachedResult).not.toHaveBeenCalled();
-    await app.close();
-  });
-});
-
-// ── Validation error propagation ──────────────────────────────────────────────
-
-describe('POST /api/query — error handling', () => {
-  it('returns 400 when query field is missing', async () => {
-    const app = await buildApp();
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/query',
-      payload: {},
-    });
-    expect(response.statusCode).toBe(400);
     await app.close();
   });
 });

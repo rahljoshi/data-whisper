@@ -18,6 +18,13 @@ Extend the NL→SQL pipeline with a configurable `mode` field that controls whet
 - [x] Update `README.md` with new API docs
 - [x] Cleanup pass: remove dead code, unused imports, ensure full test pass
 
+### Service-level refactor
+- [x] Move `mode` to service config (`QUERY_MODE` env var) — remove from request body
+- [x] Move `confirm_write` to two-endpoint flow — remove from request body
+- [x] Add `PENDING_WRITE_TTL_SECONDS` config, `pendingWriteStore.ts` (Redis-backed with in-memory fallback)
+- [x] Add `POST /api/query/confirm` endpoint accepting `{ token }`
+- [x] Update all tests and README
+
 ---
 
 ## Acceptance Criteria

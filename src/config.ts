@@ -36,10 +36,12 @@ const configSchema = z.object({
   OPENAI_TEMPERATURE: z.coerce.number().min(0).max(2).default(0),
 
   // Query Engine
+  QUERY_MODE: z.enum(['READ_ONLY', 'CRUD_ENABLED']).default('READ_ONLY'),
   QUERY_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
   QUERY_MAX_ROWS: z.coerce.number().int().positive().default(100),
   CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
   SCHEMA_REFRESH_INTERVAL_MS: z.coerce.number().int().positive().default(600000),
+  PENDING_WRITE_TTL_SECONDS: z.coerce.number().int().positive().default(300),
 
   // Security
   MAX_QUESTION_LENGTH: z.coerce.number().int().positive().default(2000),
@@ -100,10 +102,12 @@ export const config = {
     temperature: raw.OPENAI_TEMPERATURE,
   },
   query: {
+    mode: raw.QUERY_MODE,
     timeoutMs: raw.QUERY_TIMEOUT_MS,
     maxRows: raw.QUERY_MAX_ROWS,
     cacheTtlSeconds: raw.CACHE_TTL_SECONDS,
     schemaRefreshIntervalMs: raw.SCHEMA_REFRESH_INTERVAL_MS,
+    pendingWriteTtlSeconds: raw.PENDING_WRITE_TTL_SECONDS,
   },
   security: {
     maxQuestionLength: raw.MAX_QUESTION_LENGTH,

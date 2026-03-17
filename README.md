@@ -10,8 +10,8 @@ Supports **READ_ONLY** mode (SELECT-only, safe for analytics) and **CRUD_ENABLED
 
 - **NL → SQL via OpenAI** — mode-aware system prompts enforce SELECT-only or full CRUD output
 - **AST-level security** — `node-sql-parser` blocks disallowed statements before execution; no regex
-- **Read vs CRUD mode** — `READ_ONLY` default; `CRUD_ENABLED` unlocks writes with safety guardrails
-- **Write confirmation flow** — UPDATE/DELETE require a second request with `confirm_write: true`; first request returns a dry-run preview with affected row count and sample data
+- **Read vs CRUD mode** — `QUERY_MODE=READ_ONLY` (default) or `QUERY_MODE=CRUD_ENABLED`; configured at the service level, not per-request
+- **Write confirmation flow** — UPDATE/DELETE always return a dry-run preview first; execution requires a second call to `POST /api/query/confirm` with the returned `confirmation_token`
 - **WHERE clause enforcement** — UPDATE/DELETE without WHERE are rejected at the AST level
 - **Schema whitelist validation** — LLM-hallucinated tables and columns are rejected
 - **Redis caching** — identical SELECT questions return cached results instantly (1-hour TTL)
@@ -112,8 +112,10 @@ The server starts on `http://localhost:3000` by default.
 | `OPENAI_MODEL` | No | `gpt-4o` | OpenAI model to use |
 | `OPENAI_MAX_TOKENS` | No | `512` | Max tokens for SQL generation |
 | `QUERY_TIMEOUT_MS` | No | `5000` | Max query execution time in ms |
+| `QUERY_MODE` | No | `READ_ONLY` | `READ_ONLY` or `CRUD_ENABLED` — controls whether writes are allowed |
 | `QUERY_MAX_ROWS` | No | `100` | Injected LIMIT if none specified (SELECT only) |
 | `CACHE_TTL_SECONDS` | No | `3600` | Redis result cache TTL |
+| `PENDING_WRITE_TTL_SECONDS` | No | `300` | How long a confirmation token stays valid (seconds) |
 | `SCHEMA_REFRESH_INTERVAL_MS` | No | `600000` | Schema re-introspection interval |
 | `MAX_QUESTION_LENGTH` | No | `2000` | Max chars for user query input |
 | `SENSITIVE_COLUMN_PATTERNS` | No | `password,token,...` | Columns hidden from LLM |
@@ -130,47 +132,35 @@ The server starts on `http://localhost:3000` by default.
 
 ### `POST /api/query`
 
-Ask a natural language question about your database. Supports both read and write operations via the `mode` field.
+Ask a natural language question or instruction. The operating mode (`READ_ONLY` / `CRUD_ENABLED`) is configured at the service level via `QUERY_MODE` — callers never set it.
 
 #### Request Body
 
 ```json
-{
-  "query": "<natural language>",
-  "mode": "READ_ONLY | CRUD_ENABLED",
-  "confirm_write": true
-}
+{ "query": "<natural language>" }
 ```
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `query` | string | **Yes** | — | Natural language question or instruction |
-| `mode` | string | No | `READ_ONLY` | `READ_ONLY` or `CRUD_ENABLED` |
-| `confirm_write` | boolean | No | `false` | Set to `true` to execute a pending UPDATE/DELETE |
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `query` | string | **Yes** | Natural language question or write instruction |
 
 ---
 
-#### READ_ONLY mode (default)
+#### READ_ONLY mode (`QUERY_MODE=READ_ONLY`, default)
 
 Only SELECT queries are generated. Any write attempt is blocked.
 
 **Request**
-
 ```json
-{
-  "query": "Show me the top 10 customers by total order value"
-}
+{ "query": "Show me the top 10 customers by total order value" }
 ```
 
-**Success Response** `200 OK`
-
+**Response** `200 OK`
 ```json
 {
   "query": "SELECT customer_id, SUM(total) AS total_value\nFROM orders\nGROUP BY customer_id\nORDER BY total_value DESC\nLIMIT 10",
   "explanation": "Retrieves the 10 customers with the highest total order value.",
-  "data": [
-    { "customer_id": 42, "total_value": "9850.00" }
-  ],
+  "data": [{ "customer_id": 42, "total_value": "9850.00" }],
   "row_count": 10,
   "type": "READ"
 }
@@ -178,21 +168,16 @@ Only SELECT queries are generated. Any write attempt is blocked.
 
 ---
 
-#### CRUD_ENABLED — INSERT
+#### CRUD_ENABLED — INSERT (`QUERY_MODE=CRUD_ENABLED`)
 
-INSERT executes immediately. No confirmation step required.
+INSERT executes immediately — no confirmation required.
 
 **Request**
-
 ```json
-{
-  "query": "Add a new user named Alice with email alice@example.com",
-  "mode": "CRUD_ENABLED"
-}
+{ "query": "Add a new user named Alice with email alice@example.com" }
 ```
 
-**Success Response** `200 OK`
-
+**Response** `200 OK`
 ```json
 {
   "query": "INSERT INTO users (name, email)\nVALUES ('Alice', 'alice@example.com')",
@@ -206,19 +191,14 @@ INSERT executes immediately. No confirmation step required.
 
 ---
 
-#### CRUD_ENABLED — UPDATE / DELETE (confirmation flow)
+#### CRUD_ENABLED — UPDATE / DELETE (two-step confirmation)
 
-**Step 1 — Send without `confirm_write` (or with `confirm_write: false`)**
-
+**Step 1 — Send the natural language instruction**
 ```json
-{
-  "query": "Delete all users named Rahul",
-  "mode": "CRUD_ENABLED"
-}
+{ "query": "Delete all users named Rahul" }
 ```
 
-**Response** `200 OK` — dry-run preview, nothing executed
-
+**Response** `200 OK` — dry-run preview returned, nothing is executed
 ```json
 {
   "status": "AWAITING_CONFIRMATION",
@@ -235,22 +215,27 @@ INSERT executes immediately. No confirmation step required.
   },
   "query": "DELETE FROM users\nWHERE name = 'Rahul'",
   "explanation": "Deletes all user records where the name is Rahul.",
-  "confirm_to_proceed": "Resend with confirm_write: true to execute"
+  "confirmation_token": "a3f2c1d4-...",
+  "confirm_to_proceed": "POST { \"token\": \"a3f2c1d4-...\" } to /api/query/confirm to execute"
 }
 ```
 
-**Step 2 — Resend with `confirm_write: true` to execute**
+**Step 2 — Execute by sending the token to `/api/query/confirm`**
 
+See `POST /api/query/confirm` below.
+
+---
+
+### `POST /api/query/confirm`
+
+Execute a pending UPDATE or DELETE using the `confirmation_token` from Step 1. Tokens expire after `PENDING_WRITE_TTL_SECONDS` (default 5 minutes) and are single-use.
+
+#### Request Body
 ```json
-{
-  "query": "Delete all users named Rahul",
-  "mode": "CRUD_ENABLED",
-  "confirm_write": true
-}
+{ "token": "a3f2c1d4-..." }
 ```
 
 **Response** `200 OK`
-
 ```json
 {
   "query": "DELETE FROM users\nWHERE name = 'Rahul'",
@@ -259,6 +244,16 @@ INSERT executes immediately. No confirmation step required.
   "row_count": 3,
   "type": "WRITE",
   "affected_rows": 3
+}
+```
+
+**Response** `404 Not Found` — if token is unknown or expired
+```json
+{
+  "error": {
+    "type": "TOKEN_NOT_FOUND",
+    "message": "Confirmation token not found or has expired. Request a new preview first."
+  }
 }
 ```
 
@@ -325,42 +320,44 @@ Force a schema re-introspection without restarting the server. Useful after migr
 ## Architecture
 
 ```
-POST /api/query  { query, mode, confirm_write }
-      │
+POST /api/query  { query }           POST /api/query/confirm  { token }
+      │                                          │
+      ▼                                          ▼
+Rate Limiter                           pendingWriteStore.get(token)
+      │                                      │          │
+      ▼                                    found      not found
+Redis Cache? (READ_ONLY SELECT only)        │              └──▶ 404 TOKEN_NOT_FOUND
+  HIT ──────────────────────────▶ Response  │
+  MISS                                      ▼
+      │                              pg Pool: execute stored SQL
+      ▼                                      │
+Schema Service (information_schema)          ▼
+      │                              Response { type: WRITE, affected_rows }
       ▼
-Rate Limiter
-      │
-      ▼
-Redis Cache? (READ_ONLY SELECT only) ── HIT ────────────▶ Response
-      │
-     MISS
-      │
-      ▼
-Schema Service (information_schema introspection)
-      │
-      ▼
-OpenAI: NL → SQL  (mode-aware system prompt)
+OpenAI: NL → SQL  (QUERY_MODE from env)
   READ_ONLY:    SELECT only
   CRUD_ENABLED: SELECT / INSERT / UPDATE / DELETE
       │
       ▼
-node-sql-parser: AST validation (mode-aware)
-  READ_ONLY:    reject non-SELECT → WRITE_NOT_ALLOWED
-  CRUD_ENABLED: reject DDL → WRITE_NOT_ALLOWED
-                reject UPDATE/DELETE without WHERE → MISSING_WHERE_CLAUSE
-                reject unknown table/column → SCHEMA_VIOLATION
+node-sql-parser: AST validation
+  READ_ONLY:    non-SELECT → WRITE_NOT_ALLOWED
+  CRUD_ENABLED: DDL → WRITE_NOT_ALLOWED
+                UPDATE/DELETE without WHERE → MISSING_WHERE_CLAUSE
+                unknown table/column → SCHEMA_VIOLATION
   SELECT:       inject LIMIT 100 if missing
       │
-      ├── statementType = SELECT ──────────────────────────▶ pg Pool → explain → cache → Response { type: READ }
+      ├── SELECT ────▶ pg Pool → explain → cache (READ_ONLY) → Response { type: READ }
       │
-      ├── statementType = INSERT ──────────────────────────▶ pg Pool → explain → Response { type: WRITE, affected_rows }
+      ├── INSERT ────▶ pg Pool → explain → Response { type: WRITE, affected_rows }
       │
-      └── statementType = UPDATE | DELETE
+      └── UPDATE | DELETE
               │
-              ├── confirm_write != true ──▶ dry-run SELECT preview (LIMIT 10)
-              │                            └─▶ Response AWAITING_CONFIRMATION { impact, preview, warning }
+              ▼
+         dry-run SELECT preview (LIMIT 10)
+         generate confirmation_token → store in Redis (TTL: PENDING_WRITE_TTL_SECONDS)
               │
-              └── confirm_write = true ───▶ pg Pool → explain → Response { type: WRITE, affected_rows }
+              ▼
+         Response AWAITING_CONFIRMATION { impact, preview, warning, confirmation_token }
 ```
 
 ---

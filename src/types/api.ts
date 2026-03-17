@@ -2,8 +2,10 @@ export type QueryMode = 'READ_ONLY' | 'CRUD_ENABLED';
 
 export interface QueryRequest {
   query: string;
-  mode?: QueryMode;
-  confirm_write?: boolean;
+}
+
+export interface ConfirmWriteRequest {
+  token: string;
 }
 
 export interface QueryResponse {
@@ -28,6 +30,7 @@ export interface WriteConfirmationResponse {
   impact: WriteImpact;
   query: string;
   explanation: string;
+  confirmation_token: string;
   confirm_to_proceed: string;
 }
 
