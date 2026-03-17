@@ -16,6 +16,7 @@ const sampleResult: QueryResponse = {
   explanation: 'Retrieves all users.',
   data: [{ id: 1, name: 'Alice' }],
   row_count: 1,
+  type: 'READ',
 };
 
 function makeRedis() {
