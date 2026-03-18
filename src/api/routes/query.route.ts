@@ -117,8 +117,9 @@ export async function queryRoutes(
 
       // 1. Cache lookup — SELECT / READ_ONLY only
       const schemaVersion = getSchemaVersion();
+      const activeProvider = request.body.provider ?? config.llm.provider;
       if (mode === 'READ_ONLY' && redis) {
-        const cached = await getCachedResult(redis, query, schemaVersion);
+        const cached = await getCachedResult(redis, query, schemaVersion, activeProvider);
         if (cached) {
           request.log.info({ event: 'CACHE_HIT', cache_hit: true }, 'Serving result from cache');
           await insertHistory(pool, {
@@ -272,7 +273,7 @@ export async function queryRoutes(
         };
 
         if (redis) {
-          await setCachedResult(redis, query, schemaVersion, result);
+          await setCachedResult(redis, query, schemaVersion, activeProvider, result);
         }
 
         await insertHistory(pool, {

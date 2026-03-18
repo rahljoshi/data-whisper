@@ -20,6 +20,7 @@ jest.mock('../../cache/cacheService');
 jest.mock('../../config', () => ({
   config: {
     query: { mode: 'READ_ONLY', cacheTtlSeconds: 3600, pendingWriteTtlSeconds: 300 },
+    llm: { provider: 'anthropic' },
     security: { maxQuestionLength: 2000, sensitiveColumnPatterns: [] },
   },
 }));

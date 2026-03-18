@@ -12,6 +12,7 @@ import { insertHistory } from '../../history/historyService';
 import { AppError, ErrorType } from '../../types/errors';
 import type { QueryMode } from '../../types/api';
 import type { Redis } from 'ioredis';
+import { config } from '../../config';
 
 interface ReplayBody {
   history_id: string;
@@ -98,8 +99,9 @@ export async function historyRoutes(
       const schemaVersion = getSchemaVersion();
 
       // Cache lookup for READ queries
+      const replayProvider = config.llm.provider;
       if (mode === 'READ_ONLY' && redis) {
-        const cached = await getCachedResult(redis, nl_query, schemaVersion);
+        const cached = await getCachedResult(redis, nl_query, schemaVersion, replayProvider);
         if (cached) {
           request.log.info({ event: 'CACHE_HIT', history_id }, 'Replay served from cache');
           await insertHistory(pool, {
@@ -185,7 +187,7 @@ export async function historyRoutes(
         };
 
         if (mode === 'READ_ONLY' && statementType === 'SELECT' && redis) {
-          await setCachedResult(redis, nl_query, schemaVersion, {
+          await setCachedResult(redis, nl_query, schemaVersion, replayProvider, {
             query: formattedSql,
             explanation,
             data: rows,

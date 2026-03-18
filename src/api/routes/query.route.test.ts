@@ -25,6 +25,7 @@ jest.mock('../../config', () => ({
       schemaRefreshIntervalMs: 600000,
       pendingWriteTtlSeconds: 300,
     },
+    llm: { provider: 'anthropic' },
     security: { maxQuestionLength: 2000, sensitiveColumnPatterns: [] },
     rateLimit: { max: 60, windowMs: 60000 },
   },
