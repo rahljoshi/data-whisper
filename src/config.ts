@@ -117,13 +117,6 @@ export const config = {
     maxTokens: raw.LLM_MAX_TOKENS,
     temperature: raw.LLM_TEMPERATURE,
   },
-  /** @deprecated use config.llm — kept for backward compatibility until sqlGenerator/sqlExplainer are removed */
-  openai: {
-    apiKey: raw.OPENAI_API_KEY ?? '',
-    model: raw.OPENAI_MODEL,
-    maxTokens: raw.LLM_MAX_TOKENS,
-    temperature: raw.LLM_TEMPERATURE,
-  },
   query: {
     mode: raw.QUERY_MODE,
     timeoutMs: raw.QUERY_TIMEOUT_MS,

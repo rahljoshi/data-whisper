@@ -15,7 +15,7 @@ Refactor the AI service layer so the system works with any LLM provider (Anthrop
 - [x] TODO 8: Update `src/cache/cacheService.ts` — include provider name in cache key
 - [x] TODO 9: Update `src/api/routes/query.route.ts` — use ai.service, log provider+model, include in response; delete old sqlGenerator/sqlExplainer
 - [x] TODO 10: Update `.env.example` + `README.md`
-- [ ] TODO 11: End-of-plan cleanup pass
+- [x] TODO 11: End-of-plan cleanup pass
 
 ## Acceptance Criteria
 
