@@ -1,20 +1,18 @@
 import Fastify from 'fastify';
 import { historyRoutes } from './history.route';
 import * as historyService from '../../history/historyService';
-import * as sqlGenerator from '../../ai/sqlGenerator';
+import * as aiService from '../../ai/ai.service';
 import * as sqlValidator from '../../validation/sqlValidator';
 import * as queryExecutor from '../../execution/queryExecutor';
-import * as sqlExplainer from '../../ai/sqlExplainer';
 import * as schemaService from '../../schema/schemaService';
 import * as cacheService from '../../cache/cacheService';
 import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 
 jest.mock('../../history/historyService');
-jest.mock('../../ai/sqlGenerator');
+jest.mock('../../ai/ai.service');
 jest.mock('../../validation/sqlValidator');
 jest.mock('../../execution/queryExecutor');
-jest.mock('../../ai/sqlExplainer');
 jest.mock('../../schema/schemaService');
 jest.mock('../../cache/cacheService');
 jest.mock('../../config', () => ({
@@ -103,13 +101,13 @@ describe('POST /api/replay', () => {
     jest.mocked(schemaService.getSchema).mockReturnValue(new Map());
     jest.mocked(cacheService.getCachedResult).mockResolvedValue(null);
     jest.mocked(cacheService.setCachedResult).mockResolvedValue();
-    jest.mocked(sqlGenerator.generateSql).mockResolvedValue('SELECT * FROM orders LIMIT 100');
+    jest.mocked(aiService.generateSQL).mockResolvedValue({ sql: 'SELECT * FROM orders LIMIT 100', provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     jest.mocked(sqlValidator.validateSql).mockReturnValue({
       sql: 'SELECT * FROM orders LIMIT 100',
       statementType: 'SELECT',
     });
     jest.mocked(queryExecutor.executeQuery).mockResolvedValue({ rows: [], rowCount: 0 });
-    jest.mocked(sqlExplainer.explainSql).mockResolvedValue('Shows all orders.');
+    jest.mocked(aiService.explainSQL).mockResolvedValue({ explanation: 'Shows all orders.', provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
   });
 
   it('replays a query through the full pipeline and returns result', async () => {
@@ -124,7 +122,7 @@ describe('POST /api/replay', () => {
     const body = resp.json<{ replayed_from: string; type: string }>();
     expect(body.replayed_from).toBe('hist-uuid');
     expect(body.type).toBe('READ');
-    expect(sqlGenerator.generateSql).toHaveBeenCalled();
+    expect(aiService.generateSQL).toHaveBeenCalled();
   });
 
   it('stores a new history entry for the replay', async () => {
@@ -166,8 +164,8 @@ describe('POST /api/replay', () => {
 
   it('saves failure history when SQL generation fails', async () => {
     const { AppError, ErrorType } = await import('../../types/errors');
-    jest.mocked(sqlGenerator.generateSql).mockRejectedValue(
-      new AppError(ErrorType.AI_UNAVAILABLE, 'OpenAI down'),
+    jest.mocked(aiService.generateSQL).mockRejectedValue(
+      new AppError(ErrorType.AI_UNAVAILABLE, 'AI provider down'),
     );
 
     const app = await buildApp();

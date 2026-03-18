@@ -1,11 +1,10 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { Pool } from 'pg';
 import { getHistory, getHistoryById } from '../../history/historyService';
-import { generateSql } from '../../ai/sqlGenerator';
+import { generateSQL, explainSQL } from '../../ai/ai.service';
 import { validateSql } from '../../validation/sqlValidator';
 import { formatSql } from '../../utils/sqlFormatter';
 import { executeQuery } from '../../execution/queryExecutor';
-import { explainSql } from '../../ai/sqlExplainer';
 import { getSchema, getSchemaVersion } from '../../schema/schemaService';
 import { getCachedResult, setCachedResult } from '../../cache/cacheService';
 import { insertHistory } from '../../history/historyService';
@@ -121,7 +120,8 @@ export async function historyRoutes(
 
       let generatedSql: string;
       try {
-        generatedSql = await generateSql(nl_query, schema, mode as QueryMode);
+        const generated = await generateSQL(nl_query, schema, mode as QueryMode, replayProvider);
+        generatedSql = generated.sql;
       } catch (err) {
         const errorCode = err instanceof AppError ? err.type : ErrorType.AI_UNAVAILABLE;
         await insertHistory(pool, {
@@ -162,7 +162,7 @@ export async function historyRoutes(
 
       try {
         const { rows, rowCount } = await executeQuery(validatedSql);
-        const explanation = await explainSql(validatedSql);
+        const { explanation } = await explainSQL(validatedSql, replayProvider);
 
         const executionTimeMs = Date.now() - startMs;
 

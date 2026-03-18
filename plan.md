@@ -13,7 +13,7 @@ Refactor the AI service layer so the system works with any LLM provider (Anthrop
 - [ ] TODO 6: Update `src/config.ts` — LLM_PROVIDER, per-provider API keys + models, startup validation
 - [ ] TODO 7: Update `src/types/api.ts` — add `provider` to `QueryRequest`, add `provider`+`model` to `QueryResponse`
 - [ ] TODO 8: Update `src/cache/cacheService.ts` — include provider name in cache key
-- [ ] TODO 9: Update `src/api/routes/query.route.ts` — use ai.service, log provider+model, include in response; delete old sqlGenerator/sqlExplainer
+- [x] TODO 9: Update `src/api/routes/query.route.ts` — use ai.service, log provider+model, include in response; delete old sqlGenerator/sqlExplainer
 - [ ] TODO 10: Update `.env.example` + `README.md`
 - [ ] TODO 11: End-of-plan cleanup pass
 

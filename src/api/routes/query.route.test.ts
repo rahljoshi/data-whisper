@@ -4,8 +4,7 @@
  * mode is read from config (service-level), not the request body.
  */
 
-jest.mock('../../ai/sqlGenerator');
-jest.mock('../../ai/sqlExplainer');
+jest.mock('../../ai/ai.service');
 jest.mock('../../validation/sqlValidator');
 jest.mock('../../execution/queryExecutor');
 jest.mock('../../cache/cacheService');
@@ -33,8 +32,7 @@ jest.mock('../../config', () => ({
 
 import Fastify from 'fastify';
 import { queryRoutes } from './query.route';
-import { generateSql } from '../../ai/sqlGenerator';
-import { explainSql } from '../../ai/sqlExplainer';
+import { generateSQL, explainSQL } from '../../ai/ai.service';
 import { validateSql, buildPreviewSql } from '../../validation/sqlValidator';
 import { executeQuery } from '../../execution/queryExecutor';
 import { getCachedResult, setCachedResult } from '../../cache/cacheService';
@@ -51,8 +49,8 @@ import type { Pool } from 'pg';
 // ── Typed mock helpers ────────────────────────────────────────────────────────
 
 const mockConfig = config as { query: { mode: string } };
-const mockGenerateSql = generateSql as jest.MockedFunction<typeof generateSql>;
-const mockExplainSql = explainSql as jest.MockedFunction<typeof explainSql>;
+const mockGenerateSQL = generateSQL as jest.MockedFunction<typeof generateSQL>;
+const mockExplainSQL = explainSQL as jest.MockedFunction<typeof explainSQL>;
 const mockValidateSql = validateSql as jest.MockedFunction<typeof validateSql>;
 const mockBuildPreviewSql = buildPreviewSql as jest.MockedFunction<typeof buildPreviewSql>;
 const mockExecuteQuery = executeQuery as jest.MockedFunction<typeof executeQuery>;
@@ -88,7 +86,7 @@ beforeEach(() => {
   mockGetCachedResult.mockResolvedValue(null);
   mockSetCachedResult.mockResolvedValue(undefined);
   mockFormatSql.mockImplementation((sql) => sql);
-  mockExplainSql.mockResolvedValue('Returns all users');
+  mockExplainSQL.mockResolvedValue({ explanation: 'Returns all users', provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
   mockStorePendingWrite.mockResolvedValue('test-token-123');
   mockInsertHistory.mockResolvedValue('new-history-id');
   mockEstimateQueryCost.mockResolvedValue({
@@ -105,7 +103,7 @@ beforeEach(() => {
 
 describe('POST /api/query — request body shape', () => {
   it('accepts a request with only { query }', async () => {
-    mockGenerateSql.mockResolvedValue('SELECT * FROM users LIMIT 100');
+    mockGenerateSQL.mockResolvedValue({ sql: 'SELECT * FROM users LIMIT 100', provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: 'SELECT * FROM users LIMIT 100', statementType: 'SELECT' });
     mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 
@@ -123,7 +121,7 @@ describe('POST /api/query — request body shape', () => {
   it('ignores mode or confirm_write if accidentally included in the body', async () => {
     // Fastify strips unknown fields (additionalProperties: false = removeAdditional).
     // The route must use config.query.mode, not any body field.
-    mockGenerateSql.mockResolvedValue('SELECT * FROM users LIMIT 100');
+    mockGenerateSQL.mockResolvedValue({ sql: 'SELECT * FROM users LIMIT 100', provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: 'SELECT * FROM users LIMIT 100', statementType: 'SELECT' });
     mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 
@@ -135,7 +133,7 @@ describe('POST /api/query — request body shape', () => {
     });
 
     // Mode must come from config (READ_ONLY), not the body field
-    expect(mockGenerateSql).toHaveBeenCalledWith('show all users', fakeSchema, 'READ_ONLY');
+    expect(mockGenerateSQL).toHaveBeenCalledWith('show all users', fakeSchema, 'READ_ONLY', undefined);
     await app.close();
   });
 
@@ -155,7 +153,7 @@ describe('POST /api/query — request body shape', () => {
 
 describe('POST /api/query — READ_ONLY SELECT (config-driven)', () => {
   it('reads mode from config, not the request body', async () => {
-    mockGenerateSql.mockResolvedValue('SELECT * FROM users LIMIT 100');
+    mockGenerateSQL.mockResolvedValue({ sql: 'SELECT * FROM users LIMIT 100', provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: 'SELECT * FROM users LIMIT 100', statementType: 'SELECT' });
     mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
 
@@ -166,12 +164,12 @@ describe('POST /api/query — READ_ONLY SELECT (config-driven)', () => {
       payload: { query: 'show all users' },
     });
 
-    expect(mockGenerateSql).toHaveBeenCalledWith('show all users', fakeSchema, 'READ_ONLY');
+    expect(mockGenerateSQL).toHaveBeenCalledWith('show all users', fakeSchema, 'READ_ONLY', undefined);
     await app.close();
   });
 
   it('returns type: READ on SELECT', async () => {
-    mockGenerateSql.mockResolvedValue('SELECT * FROM users LIMIT 100');
+    mockGenerateSQL.mockResolvedValue({ sql: 'SELECT * FROM users LIMIT 100', provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: 'SELECT * FROM users LIMIT 100', statementType: 'SELECT' });
     mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
 
@@ -198,7 +196,7 @@ describe('POST /api/query — CRUD_ENABLED INSERT', () => {
 
   it('executes INSERT directly and returns type: WRITE', async () => {
     const insertSql = "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')";
-    mockGenerateSql.mockResolvedValue(insertSql);
+    mockGenerateSQL.mockResolvedValue({ sql: insertSql, provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: insertSql, statementType: 'INSERT' });
     mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 1 });
 
@@ -216,8 +214,8 @@ describe('POST /api/query — CRUD_ENABLED INSERT', () => {
     await app.close();
   });
 
-  it('passes CRUD_ENABLED mode to generateSql', async () => {
-    mockGenerateSql.mockResolvedValue("INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')");
+  it('passes CRUD_ENABLED mode to generateSQL', async () => {
+    mockGenerateSQL.mockResolvedValue({ sql: "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')", provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({
       sql: "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')",
       statementType: 'INSERT',
@@ -231,7 +229,7 @@ describe('POST /api/query — CRUD_ENABLED INSERT', () => {
       payload: { query: 'add user Bob' },
     });
 
-    expect(mockGenerateSql).toHaveBeenCalledWith('add user Bob', fakeSchema, 'CRUD_ENABLED');
+    expect(mockGenerateSQL).toHaveBeenCalledWith('add user Bob', fakeSchema, 'CRUD_ENABLED', undefined);
     await app.close();
   });
 });
@@ -245,7 +243,7 @@ describe('POST /api/query — CRUD_ENABLED DELETE returns AWAITING_CONFIRMATION'
 
   it('returns AWAITING_CONFIRMATION with confirmation_token', async () => {
     const deleteSql = "DELETE FROM users WHERE name = 'Rahul'";
-    mockGenerateSql.mockResolvedValue(deleteSql);
+    mockGenerateSQL.mockResolvedValue({ sql: deleteSql, provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: deleteSql, statementType: 'DELETE' });
     mockBuildPreviewSql.mockReturnValue("SELECT * FROM users WHERE name = 'Rahul' LIMIT 10");
     mockExecuteQuery.mockResolvedValue({
@@ -286,7 +284,7 @@ describe('POST /api/query — CRUD_ENABLED DELETE returns AWAITING_CONFIRMATION'
 
   it('stores the pending write in the store', async () => {
     const deleteSql = 'DELETE FROM users WHERE id = 1';
-    mockGenerateSql.mockResolvedValue(deleteSql);
+    mockGenerateSQL.mockResolvedValue({ sql: deleteSql, provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: deleteSql, statementType: 'DELETE' });
     mockBuildPreviewSql.mockReturnValue('SELECT * FROM users WHERE id = 1 LIMIT 10');
     mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
@@ -306,7 +304,7 @@ describe('POST /api/query — CRUD_ENABLED DELETE returns AWAITING_CONFIRMATION'
   });
 
   it('does not execute the write SQL, only the preview SELECT', async () => {
-    mockGenerateSql.mockResolvedValue('DELETE FROM users WHERE id = 1');
+    mockGenerateSQL.mockResolvedValue({ sql: 'DELETE FROM users WHERE id = 1', provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: 'DELETE FROM users WHERE id = 1', statementType: 'DELETE' });
     mockBuildPreviewSql.mockReturnValue('SELECT * FROM users WHERE id = 1 LIMIT 10');
     mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1 }], rowCount: 1 });
@@ -334,7 +332,7 @@ describe('POST /api/query — CRUD_ENABLED UPDATE returns AWAITING_CONFIRMATION'
 
   it('returns AWAITING_CONFIRMATION with UPDATE warning', async () => {
     const updateSql = "UPDATE users SET email = 'new@test.com' WHERE id = 1";
-    mockGenerateSql.mockResolvedValue(updateSql);
+    mockGenerateSQL.mockResolvedValue({ sql: updateSql, provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: updateSql, statementType: 'UPDATE' });
     mockBuildPreviewSql.mockReturnValue('SELECT * FROM users WHERE id = 1 LIMIT 10');
     mockExecuteQuery.mockResolvedValue({ rows: [{ id: 1, name: 'Alice' }], rowCount: 1 });
@@ -448,7 +446,7 @@ describe('POST /api/query — cache behaviour', () => {
   it('does not cache WRITE operations', async () => {
     mockConfig.query.mode = 'CRUD_ENABLED';
     const insertSql = "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')";
-    mockGenerateSql.mockResolvedValue(insertSql);
+    mockGenerateSQL.mockResolvedValue({ sql: insertSql, provider: 'anthropic', model: 'claude-sonnet-4-20250514' });
     mockValidateSql.mockReturnValue({ sql: insertSql, statementType: 'INSERT' });
     mockExecuteQuery.mockResolvedValue({ rows: [], rowCount: 1 });
 

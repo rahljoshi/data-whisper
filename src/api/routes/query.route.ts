@@ -1,6 +1,5 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { generateSql } from '../../ai/sqlGenerator';
-import { explainSql } from '../../ai/sqlExplainer';
+import { generateSQL, explainSQL } from '../../ai/ai.service';
 import { validateSql, buildPreviewSql } from '../../validation/sqlValidator';
 import { executeQuery } from '../../execution/queryExecutor';
 import { getCachedResult, setCachedResult } from '../../cache/cacheService';
@@ -28,6 +27,10 @@ const queryBodySchema = {
       minLength: 1,
       maxLength: 2000,
     },
+    provider: {
+      type: 'string',
+      enum: ['openai', 'anthropic', 'gemini'],
+    },
   },
   additionalProperties: false,
 };
@@ -51,6 +54,8 @@ const queryResponseSchema = {
       data: { type: 'array' },
       row_count: { type: 'integer' },
       type: { type: 'string' },
+      provider: { type: 'string' },
+      model: { type: 'string' },
       affected_rows: { type: 'integer' },
       operation: { type: 'string' },
       confirmation_token: { type: 'string' },
@@ -109,7 +114,7 @@ export async function queryRoutes(
       config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
     },
     async (request: FastifyRequest<{ Body: QueryRequest }>, reply: FastifyReply) => {
-      const { query } = request.body;
+      const { query, provider: requestedProvider } = request.body;
       const mode = config.query.mode;
       const startMs = Date.now();
 
@@ -117,7 +122,7 @@ export async function queryRoutes(
 
       // 1. Cache lookup — SELECT / READ_ONLY only
       const schemaVersion = getSchemaVersion();
-      const activeProvider = request.body.provider ?? config.llm.provider;
+      const activeProvider = requestedProvider ?? config.llm.provider;
       if (mode === 'READ_ONLY' && redis) {
         const cached = await getCachedResult(redis, query, schemaVersion, activeProvider);
         if (cached) {
@@ -138,12 +143,17 @@ export async function queryRoutes(
       // 2. Get schema
       const schema = getSchema();
 
-      // 3. Generate SQL (mode is service-level)
+      // 3. Generate SQL via ai.service (provider-agnostic)
       const llmStart = Date.now();
       request.log.info({ event: 'QUERY_RECEIVED', mode }, 'Generating SQL from query');
       let rawSql: string;
+      let usedProvider: string;
+      let usedModel: string;
       try {
-        rawSql = await generateSql(query, schema, mode);
+        const generated = await generateSQL(query, schema, mode, requestedProvider);
+        rawSql = generated.sql;
+        usedProvider = generated.provider;
+        usedModel = generated.model;
       } catch (err) {
         const errorCode = err instanceof AppError ? err.type : ErrorType.AI_UNAVAILABLE;
         await insertHistory(pool, {
@@ -158,7 +168,10 @@ export async function queryRoutes(
         throw err;
       }
       const llmLatencyMs = Date.now() - llmStart;
-      request.log.info({ event: 'SQL_GENERATED', llm_latency_ms: llmLatencyMs }, 'SQL generated');
+      request.log.info(
+        { event: 'SQL_GENERATED', llm_latency_ms: llmLatencyMs, provider: usedProvider, model: usedModel },
+        'SQL generated',
+      );
 
       // 4. Validate SQL at the AST level
       let validatedSql: string;
@@ -262,7 +275,7 @@ export async function queryRoutes(
         const dbExecutionMs = Date.now() - dbStart;
         request.log.info({ event: 'QUERY_EXECUTED', db_execution_ms: dbExecutionMs, row_count: rowCount }, 'SELECT executed');
 
-        const explanation = await explainSql(validatedSql);
+        const { explanation } = await explainSQL(validatedSql, usedProvider);
 
         const result: QueryResponse = {
           query: formattedSql,
@@ -270,6 +283,8 @@ export async function queryRoutes(
           data: rows,
           row_count: rowCount,
           type: 'READ',
+          provider: usedProvider,
+          model: usedModel,
         };
 
         if (redis) {
@@ -313,7 +328,7 @@ export async function queryRoutes(
           });
           throw err;
         }
-        const explanation = await explainSql(validatedSql);
+        const { explanation } = await explainSQL(validatedSql, usedProvider);
 
         await insertHistory(pool, {
           nl_query: query,
@@ -333,6 +348,8 @@ export async function queryRoutes(
           row_count: rowCount,
           type: 'WRITE',
           affected_rows: rowCount,
+          provider: usedProvider,
+          model: usedModel,
         });
       }
 
@@ -343,7 +360,7 @@ export async function queryRoutes(
 
         const previewSql = buildPreviewSql(validatedSql);
         const { rows: previewRows, rowCount: previewCount } = await executeQuery(previewSql);
-        const explanation = await explainSql(validatedSql);
+        const { explanation } = await explainSQL(validatedSql, usedProvider);
 
         const warning =
           statementType === 'DELETE'
@@ -371,7 +388,7 @@ export async function queryRoutes(
           confirm_to_proceed: `POST { "token": "${token}" } to /api/query/confirm to execute`,
         };
 
-        return reply.send(confirmation);
+        return reply.send({ ...confirmation, provider: usedProvider, model: usedModel });
       }
 
       return reply.status(500).send({ error: { type: 'INTERNAL_ERROR', message: 'Unhandled statement type' } });
