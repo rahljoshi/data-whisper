@@ -29,11 +29,18 @@ const configSchema = z.object({
     .transform((v) => v === 'true')
     .default('false'),
 
-  // OpenAI
-  OPENAI_API_KEY: z.string().min(1, 'OPENAI_API_KEY is required'),
+  // Multi-provider LLM
+  LLM_PROVIDER: z.enum(['openai', 'anthropic', 'gemini']).default('anthropic'),
+  // Per-provider API keys — all optional at schema level; startup validates the active provider key
+  OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-4o'),
-  OPENAI_MAX_TOKENS: z.coerce.number().int().positive().default(512),
-  OPENAI_TEMPERATURE: z.coerce.number().min(0).max(2).default(0),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-20250514'),
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_MODEL: z.string().default('gemini-1.5-pro'),
+  // Shared LLM tuning
+  LLM_MAX_TOKENS: z.coerce.number().int().positive().default(512),
+  LLM_TEMPERATURE: z.coerce.number().min(0).max(2).default(0),
 
   // Query Engine
   QUERY_MODE: z.enum(['READ_ONLY', 'CRUD_ENABLED']).default('READ_ONLY'),
@@ -99,11 +106,23 @@ export const config = {
     password: raw.REDIS_PASSWORD,
     tls: raw.REDIS_TLS,
   },
+  llm: {
+    provider: raw.LLM_PROVIDER,
+    openaiApiKey: raw.OPENAI_API_KEY,
+    openaiModel: raw.OPENAI_MODEL,
+    anthropicApiKey: raw.ANTHROPIC_API_KEY,
+    anthropicModel: raw.ANTHROPIC_MODEL,
+    geminiApiKey: raw.GEMINI_API_KEY,
+    geminiModel: raw.GEMINI_MODEL,
+    maxTokens: raw.LLM_MAX_TOKENS,
+    temperature: raw.LLM_TEMPERATURE,
+  },
+  /** @deprecated use config.llm — kept for backward compatibility until sqlGenerator/sqlExplainer are removed */
   openai: {
-    apiKey: raw.OPENAI_API_KEY,
+    apiKey: raw.OPENAI_API_KEY ?? '',
     model: raw.OPENAI_MODEL,
-    maxTokens: raw.OPENAI_MAX_TOKENS,
-    temperature: raw.OPENAI_TEMPERATURE,
+    maxTokens: raw.LLM_MAX_TOKENS,
+    temperature: raw.LLM_TEMPERATURE,
   },
   query: {
     mode: raw.QUERY_MODE,
