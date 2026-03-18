@@ -2,6 +2,8 @@ export type QueryMode = 'READ_ONLY' | 'CRUD_ENABLED';
 
 export interface QueryRequest {
   query: string;
+  /** Optional LLM provider override. Falls back to LLM_PROVIDER env var. */
+  provider?: 'openai' | 'anthropic' | 'gemini';
 }
 
 export interface ConfirmWriteRequest {
@@ -15,6 +17,10 @@ export interface QueryResponse {
   row_count: number;
   type: 'READ' | 'WRITE';
   affected_rows?: number;
+  /** LLM provider that generated the SQL, e.g. 'anthropic' */
+  provider?: string;
+  /** Exact model used, e.g. 'claude-sonnet-4-20250514' */
+  model?: string;
 }
 
 export interface WriteImpact {
