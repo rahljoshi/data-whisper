@@ -17,6 +17,29 @@ alwaysApply: true
    git commit -m "plan: <feature-name> - initial plan"
    git push
 ```
+## 🗂️ Plan File Management
+
+Never overwrite or modify an existing `plan.md`. Instead:
+
+1. Check if `plan.md` already exists in root
+2. If it does — move it to the `plans/` folder with a meaningful name:
+   - Feature plan → `plans/feat-<feature-name>-plan.md`
+   - Bug fix → `plans/fix-<bug-name>-plan.md`
+   - Chore/refactor → `plans/chore-<task-name>-plan.md`
+   - Example: `plans/feat-read-vs-crud-mode-plan.md`
+3. Create a fresh `plan.md` in root for the current feature
+4. Commit everything together:
+```
+   git add plans/ plan.md
+   git commit -m "plan: archive previous plan, start <feature-name>"
+   git push
+```
+
+### Rules:
+- `plans/` folder is the archive — never delete files from it
+- Root `plan.md` always represents ONLY the current active feature
+- Plan filenames must be lowercase, hyphenated, no spaces
+- Never name an archived plan `plan-old.md` or `plan-copy.md` — always use the actual feature/fix name
 
 ---
 
