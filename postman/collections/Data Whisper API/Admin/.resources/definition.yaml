@@ -1,0 +1,4 @@
+$kind: collection
+name: Admin
+description: Administrative endpoints for schema management
+order: 2000

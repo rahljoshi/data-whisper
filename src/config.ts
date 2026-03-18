@@ -55,6 +55,10 @@ const configSchema = z.object({
 
   // Schema
   DB_SCHEMAS: z.string().default('public'),
+
+  // Query Cost Estimation
+  QUERY_COST_THRESHOLD: z.coerce.number().positive().default(10000),
+  SEQ_SCAN_ROW_THRESHOLD: z.coerce.number().int().positive().default(100000),
 });
 
 function loadConfig() {
@@ -118,6 +122,10 @@ export const config = {
   rateLimit: {
     max: raw.RATE_LIMIT_MAX,
     windowMs: raw.RATE_LIMIT_WINDOW_MS,
+  },
+  costEstimation: {
+    queryCostThreshold: raw.QUERY_COST_THRESHOLD,
+    seqScanRowThreshold: raw.SEQ_SCAN_ROW_THRESHOLD,
   },
 } as const;
 

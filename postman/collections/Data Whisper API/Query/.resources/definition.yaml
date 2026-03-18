@@ -1,0 +1,4 @@
+$kind: collection
+name: Query
+description: Natural language to SQL query endpoints
+order: 1000

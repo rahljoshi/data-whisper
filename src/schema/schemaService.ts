@@ -5,6 +5,7 @@ import { config } from '../config';
 import type { ColumnInfo, DbSchema, SchemaSnapshot, TableInfo } from '../types/schema';
 
 const REDIS_SCHEMA_KEY = 'data-whisper:schema';
+const REDIS_SCHEMA_VERSION_KEY = 'schema:version';
 const REDIS_SCHEMA_TTL = 600; // 10 minutes
 
 let snapshot: SchemaSnapshot | null = null;
@@ -45,17 +46,18 @@ function deserializeSchema(raw: string): DbSchema {
 }
 
 /**
- * Compute a stable SHA-256 hash of the schema for cache key versioning.
+ * Compute a full SHA-256 hash of the schema (tables + columns + types) for cache versioning.
  */
 function computeSchemaVersion(schema: DbSchema): string {
   const keys: string[] = [];
-  for (const [tableKey, tableInfo] of schema.entries()) {
-    for (const colName of tableInfo.columns.keys()) {
-      keys.push(`${tableKey}.${colName}`);
+  for (const [_tableKey, tableInfo] of schema.entries()) {
+    const qualifiedKey = `${tableInfo.schema}.${tableInfo.tableName}`;
+    for (const [colName, colInfo] of tableInfo.columns.entries()) {
+      keys.push(`${qualifiedKey}.${colName}:${colInfo.dataType}`);
     }
   }
   keys.sort();
-  return createHash('sha256').update(keys.join('|')).digest('hex').slice(0, 16);
+  return createHash('sha256').update(keys.join('|')).digest('hex');
 }
 
 /**
@@ -148,11 +150,27 @@ export async function loadSchema(pool: Pool, redis: Redis | null): Promise<void>
 
 /**
  * Force-reload schema from the database and update Redis cache.
+ * Logs SCHEMA_CHANGED if the hash has changed since the previous snapshot.
  */
 export async function refreshSchemaFromDb(pool: Pool, redis: Redis | null): Promise<void> {
   const schema = await introspectDatabase(pool);
   const version = computeSchemaVersion(schema);
+
+  const previousVersion = snapshot?.version ?? null;
+  const schemaChanged = previousVersion !== null && previousVersion !== version;
+
   snapshot = { schema, version, loadedAt: new Date() };
+
+  if (schemaChanged) {
+    console.info(
+      JSON.stringify({
+        event: 'SCHEMA_CHANGED',
+        previous_hash: previousVersion,
+        new_hash: version,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+  }
 
   if (redis) {
     try {
@@ -162,10 +180,23 @@ export async function refreshSchemaFromDb(pool: Pool, redis: Redis | null): Prom
         'EX',
         REDIS_SCHEMA_TTL,
       );
+      await redis.set(REDIS_SCHEMA_VERSION_KEY, version);
     } catch {
       // Non-fatal: continue without caching
     }
   }
+}
+
+/**
+ * Return the number of unique tables in the current snapshot.
+ */
+export function getSchemaTableCount(): number {
+  if (!snapshot) return 0;
+  const seen = new Set<string>();
+  for (const [_key, tableInfo] of snapshot.schema.entries()) {
+    seen.add(`${tableInfo.schema}.${tableInfo.tableName}`);
+  }
+  return seen.size;
 }
 
 /**

@@ -1,0 +1,22 @@
+$kind: http-request
+name: Health Check
+method: GET
+url: '{{baseUrl}}/health'
+order: 1000
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status code is 2xx or 503 (degraded)", function () {
+          pm.expect(pm.response.code).to.be.oneOf([200, 503]);
+      });
+      
+      pm.test("Response has health structure", function () {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("status");
+          pm.expect(json).to.have.property("uptime");
+          pm.expect(json).to.have.property("timestamp");
+          pm.expect(json).to.have.property("services");
+          pm.expect(json.services).to.have.property("database");
+          pm.expect(json.services).to.have.property("redis");
+      });

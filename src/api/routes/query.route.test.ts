@@ -12,6 +12,9 @@ jest.mock('../../cache/cacheService');
 jest.mock('../../schema/schemaService');
 jest.mock('../../utils/sqlFormatter');
 jest.mock('../../cache/pendingWriteStore');
+jest.mock('../../history/historyService');
+jest.mock('../../rbac/rbacService');
+jest.mock('../../execution/costEstimator');
 jest.mock('../../config', () => ({
   config: {
     query: {
@@ -37,9 +40,12 @@ import { getCachedResult, setCachedResult } from '../../cache/cacheService';
 import { getSchema, getSchemaVersion } from '../../schema/schemaService';
 import { formatSql } from '../../utils/sqlFormatter';
 import { storePendingWrite, getPendingWrite } from '../../cache/pendingWriteStore';
+import { insertHistory } from '../../history/historyService';
+import { estimateQueryCost, assertCostAcceptable } from '../../execution/costEstimator';
 import { config } from '../../config';
 import type { DbSchema } from '../../types/schema';
 import type { PendingWrite } from '../../cache/pendingWriteStore';
+import type { Pool } from 'pg';
 
 // ── Typed mock helpers ────────────────────────────────────────────────────────
 
@@ -56,12 +62,17 @@ const mockGetSchemaVersion = getSchemaVersion as jest.MockedFunction<typeof getS
 const mockFormatSql = formatSql as jest.MockedFunction<typeof formatSql>;
 const mockStorePendingWrite = storePendingWrite as jest.MockedFunction<typeof storePendingWrite>;
 const mockGetPendingWrite = getPendingWrite as jest.MockedFunction<typeof getPendingWrite>;
+const mockInsertHistory = insertHistory as jest.MockedFunction<typeof insertHistory>;
+const mockEstimateQueryCost = estimateQueryCost as jest.MockedFunction<typeof estimateQueryCost>;
+const mockAssertCostAcceptable = assertCostAcceptable as jest.MockedFunction<typeof assertCostAcceptable>;
+
+const mockPool = {} as Pool;
 
 // ── Test setup ────────────────────────────────────────────────────────────────
 
 async function buildApp() {
   const app = Fastify({ logger: false });
-  await app.register(queryRoutes, { redis: null });
+  await app.register(queryRoutes, { redis: null, pool: mockPool });
   await app.ready();
   return app;
 }
@@ -78,6 +89,15 @@ beforeEach(() => {
   mockFormatSql.mockImplementation((sql) => sql);
   mockExplainSql.mockResolvedValue('Returns all users');
   mockStorePendingWrite.mockResolvedValue('test-token-123');
+  mockInsertHistory.mockResolvedValue('new-history-id');
+  mockEstimateQueryCost.mockResolvedValue({
+    total_cost: 10,
+    has_seq_scan: false,
+    seq_scan_tables: [],
+    estimated_rows: 100,
+    plan_summary: 'Index Scan',
+  });
+  mockAssertCostAcceptable.mockReturnValue(undefined);
 });
 
 // ── Request body: only query field ───────────────────────────────────────────

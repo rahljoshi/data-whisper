@@ -1,0 +1,18 @@
+$kind: http-request
+name: Refresh Schema
+method: POST
+url: '{{baseUrl}}/admin/refresh-schema'
+order: 1000
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status code is successful", function () {
+          pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);
+      });
+      
+      pm.test("Response confirms schema refresh", function () {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("ok", true);
+          pm.expect(json).to.have.property("message");
+      });

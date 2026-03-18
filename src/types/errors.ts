@@ -10,6 +10,16 @@ export const ErrorType = {
   INTERNAL_ERROR: 'INTERNAL_ERROR',
   WRITE_NOT_ALLOWED: 'WRITE_NOT_ALLOWED',
   MISSING_WHERE_CLAUSE: 'MISSING_WHERE_CLAUSE',
+  // RBAC
+  TABLE_ACCESS_DENIED: 'TABLE_ACCESS_DENIED',
+  CRUD_NOT_ALLOWED: 'CRUD_NOT_ALLOWED',
+  USER_CONTEXT_MISSING: 'USER_CONTEXT_MISSING',
+  // Cost estimation
+  QUERY_TOO_EXPENSIVE: 'QUERY_TOO_EXPENSIVE',
+  // History / feedback
+  HISTORY_NOT_FOUND: 'HISTORY_NOT_FOUND',
+  FEEDBACK_ALREADY_SUBMITTED: 'FEEDBACK_ALREADY_SUBMITTED',
+  INVALID_FEEDBACK_VALUE: 'INVALID_FEEDBACK_VALUE',
 } as const;
 
 export type ErrorType = (typeof ErrorType)[keyof typeof ErrorType];
@@ -41,6 +51,18 @@ export class AppError extends Error {
         return 504;
       case ErrorType.AI_UNAVAILABLE:
         return 502;
+      case ErrorType.TABLE_ACCESS_DENIED:
+      case ErrorType.CRUD_NOT_ALLOWED:
+        return 403;
+      case ErrorType.USER_CONTEXT_MISSING:
+        return 401;
+      case ErrorType.QUERY_TOO_EXPENSIVE:
+        return 400;
+      case ErrorType.HISTORY_NOT_FOUND:
+        return 404;
+      case ErrorType.FEEDBACK_ALREADY_SUBMITTED:
+      case ErrorType.INVALID_FEEDBACK_VALUE:
+        return 400;
       case ErrorType.EXECUTION_ERROR:
       case ErrorType.INTERNAL_ERROR:
         return 500;

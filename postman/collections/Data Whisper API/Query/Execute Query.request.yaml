@@ -1,0 +1,29 @@
+$kind: http-request
+name: Execute Query
+method: POST
+url: '{{baseUrl}}/api/query'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "question": "Show me all users"
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status code is successful", function () {
+          pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);
+      });
+      
+      pm.test("Response has expected structure", function () {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("query");
+          pm.expect(json).to.have.property("explanation");
+          pm.expect(json).to.have.property("data");
+          pm.expect(json).to.have.property("row_count");
+      });

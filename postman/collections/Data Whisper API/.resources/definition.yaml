@@ -1,0 +1,13 @@
+$kind: collection
+name: Data Whisper API
+description: |-
+  Natural Language to SQL engine API.
+  
+  **Endpoints:**
+  - Query: Convert natural language questions to SQL and execute
+  - Admin: Schema management
+  - Health: Service health checks
+variables:
+  - key: baseUrl
+    value: 'http://localhost:3000'
+    description: Base URL for the Data Whisper API

@@ -7,10 +7,15 @@ import { getCachedResult, setCachedResult } from '../../cache/cacheService';
 import { getSchema, getSchemaVersion, refreshSchemaFromDb } from '../../schema/schemaService';
 import { formatSql } from '../../utils/sqlFormatter';
 import { storePendingWrite, getPendingWrite } from '../../cache/pendingWriteStore';
+import { insertHistory } from '../../history/historyService';
+import { extractUserContext, loadUserRole, validateAccess, extractTablesFromSql } from '../../rbac/rbacService';
+import { estimateQueryCost, assertCostAcceptable } from '../../execution/costEstimator';
 import type { QueryRequest, ConfirmWriteRequest, QueryResponse, WriteConfirmationResponse } from '../../types/api';
+import { AppError, ErrorType } from '../../types/errors';
 import { getPool } from '../../execution/queryExecutor';
 import { config } from '../../config';
 import type { Redis } from 'ioredis';
+import type { Pool } from 'pg';
 
 // ── JSON schemas ──────────────────────────────────────────────────────────────
 
@@ -79,9 +84,9 @@ const queryResponseSchema = {
 
 export async function queryRoutes(
   fastify: FastifyInstance,
-  options: { redis: Redis | null },
+  options: { redis: Redis | null; pool: Pool },
 ): Promise<void> {
-  const { redis } = options;
+  const { redis, pool } = options;
 
   /**
    * POST /api/query
@@ -101,17 +106,30 @@ export async function queryRoutes(
         body: queryBodySchema,
         response: queryResponseSchema,
       },
+      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
     },
     async (request: FastifyRequest<{ Body: QueryRequest }>, reply: FastifyReply) => {
       const { query } = request.body;
       const mode = config.query.mode;
+      const startMs = Date.now();
+
+      request.log.info({ event: 'QUERY_RECEIVED', mode }, 'Query received');
 
       // 1. Cache lookup — SELECT / READ_ONLY only
       const schemaVersion = getSchemaVersion();
       if (mode === 'READ_ONLY' && redis) {
         const cached = await getCachedResult(redis, query, schemaVersion);
         if (cached) {
-          request.log.info({ cacheHit: true }, 'Serving result from cache');
+          request.log.info({ event: 'CACHE_HIT', cache_hit: true }, 'Serving result from cache');
+          await insertHistory(pool, {
+            nl_query: query,
+            generated_sql: cached.query,
+            mode,
+            type: 'READ',
+            execution_time_ms: Date.now() - startMs,
+            row_count: cached.row_count,
+            status: 'success',
+          });
           return reply.send(cached);
         }
       }
@@ -120,12 +138,75 @@ export async function queryRoutes(
       const schema = getSchema();
 
       // 3. Generate SQL (mode is service-level)
-      request.log.info({ mode }, 'Generating SQL from query');
-      const rawSql = await generateSql(query, schema, mode);
+      const llmStart = Date.now();
+      request.log.info({ event: 'QUERY_RECEIVED', mode }, 'Generating SQL from query');
+      let rawSql: string;
+      try {
+        rawSql = await generateSql(query, schema, mode);
+      } catch (err) {
+        const errorCode = err instanceof AppError ? err.type : ErrorType.AI_UNAVAILABLE;
+        await insertHistory(pool, {
+          nl_query: query,
+          generated_sql: '',
+          mode,
+          type: 'READ',
+          execution_time_ms: Date.now() - startMs,
+          status: 'failure',
+          error_code: errorCode,
+        });
+        throw err;
+      }
+      const llmLatencyMs = Date.now() - llmStart;
+      request.log.info({ event: 'SQL_GENERATED', llm_latency_ms: llmLatencyMs }, 'SQL generated');
 
       // 4. Validate SQL at the AST level
-      request.log.info({ rawSql, mode }, 'Validating generated SQL');
-      const { sql: validatedSql, statementType } = validateSql(rawSql, schema, mode);
+      let validatedSql: string;
+      let statementType: string;
+      try {
+        const validated = validateSql(rawSql, schema, mode);
+        validatedSql = validated.sql;
+        statementType = validated.statementType;
+        request.log.info({ event: 'QUERY_EXECUTED', validation_passed: true }, 'SQL validated');
+      } catch (err) {
+        request.log.warn({ event: 'VALIDATION_FAILED', validation_passed: false }, 'SQL validation failed');
+        const errorCode = err instanceof AppError ? err.type : ErrorType.INVALID_SQL;
+        await insertHistory(pool, {
+          nl_query: query,
+          generated_sql: rawSql,
+          mode,
+          type: 'READ',
+          execution_time_ms: Date.now() - startMs,
+          status: 'failure',
+          error_code: errorCode,
+        });
+        throw err;
+      }
+
+      // 4b. RBAC — validate table access when user context headers are present
+      const hasUserContext =
+        request.headers['x-user-id'] || request.headers['x-user-role'];
+      if (hasUserContext) {
+        try {
+          const userContext = extractUserContext(
+            request.headers as Record<string, string | undefined>,
+          );
+          const rbacRole = await loadUserRole(pool, userContext.userId);
+          const accessedTables = extractTablesFromSql(validatedSql);
+          validateAccess(userContext, rbacRole, accessedTables, mode);
+        } catch (err) {
+          const errorCode = err instanceof AppError ? err.type : ErrorType.TABLE_ACCESS_DENIED;
+          await insertHistory(pool, {
+            nl_query: query,
+            generated_sql: validatedSql,
+            mode,
+            type: 'READ',
+            execution_time_ms: Date.now() - startMs,
+            status: 'failure',
+            error_code: errorCode,
+          });
+          throw err;
+        }
+      }
 
       // 5. Format SQL for human-readable responses
       const formattedSql = formatSql(validatedSql);
@@ -134,7 +215,52 @@ export async function queryRoutes(
 
       if (statementType === 'SELECT') {
         request.log.info({ sql: validatedSql }, 'Executing SELECT query');
-        const { rows, rowCount } = await executeQuery(validatedSql);
+
+        // 5b. Cost estimation — run EXPLAIN before executing
+        const costEstimation = await estimateQueryCost(pool, validatedSql);
+        try {
+          assertCostAcceptable(costEstimation);
+        } catch (err) {
+          const errorCode = err instanceof AppError ? err.type : ErrorType.QUERY_TOO_EXPENSIVE;
+          await insertHistory(pool, {
+            nl_query: query,
+            generated_sql: validatedSql,
+            mode,
+            type: 'READ',
+            execution_time_ms: Date.now() - startMs,
+            status: 'failure',
+            error_code: errorCode,
+          });
+          return reply.status(400).send({
+            error: 'QUERY_TOO_EXPENSIVE',
+            message: err instanceof AppError ? err.message : 'Query cost exceeds threshold.',
+            estimation: costEstimation,
+          });
+        }
+
+        const dbStart = Date.now();
+        let rows: Record<string, unknown>[];
+        let rowCount: number;
+        try {
+          const result = await executeQuery(validatedSql);
+          rows = result.rows;
+          rowCount = result.rowCount;
+        } catch (err) {
+          const errorCode = err instanceof AppError ? err.type : ErrorType.EXECUTION_ERROR;
+          await insertHistory(pool, {
+            nl_query: query,
+            generated_sql: validatedSql,
+            mode,
+            type: 'READ',
+            execution_time_ms: Date.now() - startMs,
+            status: 'failure',
+            error_code: errorCode,
+          });
+          throw err;
+        }
+        const dbExecutionMs = Date.now() - dbStart;
+        request.log.info({ event: 'QUERY_EXECUTED', db_execution_ms: dbExecutionMs, row_count: rowCount }, 'SELECT executed');
+
         const explanation = await explainSql(validatedSql);
 
         const result: QueryResponse = {
@@ -149,16 +275,56 @@ export async function queryRoutes(
           await setCachedResult(redis, query, schemaVersion, result);
         }
 
-        return reply.send(result);
+        await insertHistory(pool, {
+          nl_query: query,
+          generated_sql: validatedSql,
+          mode,
+          type: 'READ',
+          execution_time_ms: Date.now() - startMs,
+          row_count: rowCount,
+          status: 'success',
+        });
+
+        request.log.info({ event: 'QUERY_EXECUTED', total_request_ms: Date.now() - startMs }, 'Request complete');
+        return reply.send({ ...result, cost_estimation: costEstimation });
       }
 
       // ── INSERT — execute directly, no confirmation required ──────────────
 
       if (statementType === 'INSERT') {
         request.log.info({ sql: validatedSql }, 'Executing INSERT query');
-        const { rows, rowCount } = await executeQuery(validatedSql);
+        let rows: Record<string, unknown>[];
+        let rowCount: number;
+        try {
+          const result = await executeQuery(validatedSql);
+          rows = result.rows;
+          rowCount = result.rowCount;
+        } catch (err) {
+          const errorCode = err instanceof AppError ? err.type : ErrorType.EXECUTION_ERROR;
+          await insertHistory(pool, {
+            nl_query: query,
+            generated_sql: validatedSql,
+            mode,
+            type: 'WRITE',
+            execution_time_ms: Date.now() - startMs,
+            status: 'failure',
+            error_code: errorCode,
+          });
+          throw err;
+        }
         const explanation = await explainSql(validatedSql);
 
+        await insertHistory(pool, {
+          nl_query: query,
+          generated_sql: validatedSql,
+          mode,
+          type: 'WRITE',
+          execution_time_ms: Date.now() - startMs,
+          affected_rows: rowCount,
+          status: 'success',
+        });
+
+        request.log.info({ event: 'WRITE_CONFIRMED', affected_rows: rowCount }, 'INSERT executed');
         return reply.send({
           query: formattedSql,
           explanation,
@@ -227,6 +393,7 @@ export async function queryRoutes(
         body: confirmBodySchema,
         response: queryResponseSchema,
       },
+      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
     },
     async (request: FastifyRequest<{ Body: ConfirmWriteRequest }>, reply: FastifyReply) => {
       const { token } = request.body;

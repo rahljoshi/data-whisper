@@ -8,6 +8,10 @@ import { loadSchema, startSchemaRefreshTimer, stopSchemaRefreshTimer } from './s
 import { getPool, closePool, testConnection } from './execution/queryExecutor';
 import { errorHandlerPlugin } from './api/plugins/errorHandler';
 import { queryRoutes } from './api/routes/query.route';
+import { historyRoutes } from './api/routes/history.route';
+import { schemaVersionRoutes } from './api/routes/schema.route';
+import { metricsRoutes } from './api/routes/metrics.route';
+import { feedbackRoutes } from './api/routes/feedback.route';
 
 async function buildServer() {
   const fastify = Fastify({
@@ -19,37 +23,21 @@ async function buildServer() {
           options: { colorize: true, translateTime: 'HH:MM:ss' },
         },
       }),
+      serializers: {
+        req(req) {
+          return {
+            method: req.method,
+            url: req.url,
+            request_id: req.id,
+          };
+        },
+      },
     },
+    genReqId: () => crypto.randomUUID(),
     trustProxy: true,
   });
 
-  // ── Security plugins ──────────────────────────────────────────────────────
-
-  await fastify.register(helmet, {
-    contentSecurityPolicy: false,
-  });
-
-  await fastify.register(cors, {
-    origin: config.server.isDev ? true : false,
-    methods: ['GET', 'POST'],
-  });
-
-  await fastify.register(rateLimit, {
-    max: config.rateLimit.max,
-    timeWindow: config.rateLimit.windowMs,
-    errorResponseBuilder: () => ({
-      error: {
-        type: 'RATE_LIMIT_EXCEEDED',
-        message: 'Too many requests. Please slow down.',
-      },
-    }),
-  });
-
-  // ── Error handler ─────────────────────────────────────────────────────────
-
-  await fastify.register(errorHandlerPlugin);
-
-  // ── Redis ─────────────────────────────────────────────────────────────────
+  // ── Redis (initialized first so it can back the rate limiter) ─────────────
 
   let redis: Redis | null = null;
 
@@ -69,6 +57,35 @@ async function buildServer() {
     fastify.log.warn(`Redis unavailable — cache disabled: ${message}`);
     redis = null;
   }
+
+  // ── Security plugins ──────────────────────────────────────────────────────
+
+  await fastify.register(helmet, {
+    contentSecurityPolicy: false,
+  });
+
+  await fastify.register(cors, {
+    origin: config.server.isDev ? true : false,
+    methods: ['GET', 'POST'],
+  });
+
+  await fastify.register(rateLimit, {
+    max: config.rateLimit.max,
+    timeWindow: config.rateLimit.windowMs,
+    redis: redis ?? undefined,
+    keyGenerator: (request) => {
+      return (request.headers['x-user-id'] as string) ?? request.ip;
+    },
+    errorResponseBuilder: (_request, context) => ({
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many requests. Please wait before retrying.',
+      retry_after_seconds: Math.ceil(context.ttl / 1000),
+    }),
+  });
+
+  // ── Error handler ─────────────────────────────────────────────────────────
+
+  await fastify.register(errorHandlerPlugin);
 
   // ── Database ──────────────────────────────────────────────────────────────
 
@@ -93,7 +110,11 @@ async function buildServer() {
 
   // ── Routes ────────────────────────────────────────────────────────────────
 
-  await fastify.register(queryRoutes, { redis });
+  await fastify.register(queryRoutes, { redis, pool });
+  await fastify.register(historyRoutes, { pool, redis });
+  await fastify.register(schemaVersionRoutes, { redis });
+  await fastify.register(metricsRoutes, { pool });
+  await fastify.register(feedbackRoutes, { pool });
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────
 
