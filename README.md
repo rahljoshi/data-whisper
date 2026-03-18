@@ -8,7 +8,7 @@ Supports **READ_ONLY** mode (SELECT-only, safe for analytics) and **CRUD_ENABLED
 
 ## Features
 
-- **NL → SQL via OpenAI** — mode-aware system prompts enforce SELECT-only or full CRUD output
+- **Multi-provider LLM** — swap between Anthropic, OpenAI, and Google Gemini per request; default set via `LLM_PROVIDER` env var
 - **AST-level security** — `node-sql-parser` blocks disallowed statements before execution; no regex
 - **Read vs CRUD mode** — `QUERY_MODE=READ_ONLY` (default) or `QUERY_MODE=CRUD_ENABLED`; configured at the service level, not per-request
 - **Write confirmation flow** — UPDATE/DELETE always return a dry-run preview first; execution requires a second call to `/api/query/confirm`
@@ -33,7 +33,7 @@ Supports **READ_ONLY** mode (SELECT-only, safe for analytics) and **CRUD_ENABLED
 |---|---|
 | HTTP Framework | Fastify 5 |
 | Language | TypeScript 5 |
-| AI | OpenAI API (gpt-4o / gpt-4.1 / gpt-5) |
+| AI | Anthropic, OpenAI, Google Gemini (provider pattern) |
 | Database | PostgreSQL (pg pool) |
 | Cache | Redis (ioredis) |
 | SQL Parsing | node-sql-parser |
@@ -47,7 +47,7 @@ Supports **READ_ONLY** mode (SELECT-only, safe for analytics) and **CRUD_ENABLED
 - Node.js >= 18
 - PostgreSQL (any version with `information_schema`)
 - Redis (optional — service degrades gracefully without it)
-- An OpenAI API key
+- An API key for at least one LLM provider (Anthropic, OpenAI, or Gemini)
 
 ---
 
@@ -68,7 +68,12 @@ cp .env.example .env
 Edit `.env` and set at minimum:
 
 ```env
-OPENAI_API_KEY=sk-...
+# Choose your default provider: openai | anthropic | gemini
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...       # required when LLM_PROVIDER=anthropic
+# OPENAI_API_KEY=sk-...            # required when LLM_PROVIDER=openai
+# GEMINI_API_KEY=AI...             # required when LLM_PROVIDER=gemini
+
 DATABASE_URL=postgresql://user:password@localhost:5432/mydb
 REDIS_URL=redis://localhost:6379
 ```
@@ -121,20 +126,27 @@ The server starts on `http://localhost:3000` by default.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `OPENAI_API_KEY` | **Yes** | — | OpenAI API key |
 | `DATABASE_URL` | **Yes*** | — | Full PostgreSQL connection string |
 | `REDIS_URL` | No | `redis://localhost:6379` | Redis connection URL |
 | `PORT` | No | `3000` | HTTP port |
 | `HOST` | No | `0.0.0.0` | HTTP bind address |
 | `NODE_ENV` | No | `development` | `development` / `production` / `test` |
 
-### OpenAI
+### Multi-Provider LLM
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `OPENAI_MODEL` | No | `gpt-4o` | OpenAI model to use |
-| `OPENAI_MAX_TOKENS` | No | `512` | Max tokens for SQL generation |
-| `OPENAI_TEMPERATURE` | No | `0` | Sampling temperature (0 = deterministic) |
+| `LLM_PROVIDER` | No | `anthropic` | Default provider: `openai` \| `anthropic` \| `gemini` |
+| `LLM_MAX_TOKENS` | No | `512` | Max completion tokens (shared across providers) |
+| `LLM_TEMPERATURE` | No | `0` | Sampling temperature — 0 = deterministic |
+| `ANTHROPIC_API_KEY` | Cond. | — | Required when `LLM_PROVIDER=anthropic` |
+| `ANTHROPIC_MODEL` | No | `claude-sonnet-4-20250514` | Anthropic model name |
+| `OPENAI_API_KEY` | Cond. | — | Required when `LLM_PROVIDER=openai` |
+| `OPENAI_MODEL` | No | `gpt-4o` | OpenAI model name |
+| `GEMINI_API_KEY` | Cond. | — | Required when `LLM_PROVIDER=gemini` |
+| `GEMINI_MODEL` | No | `gemini-1.5-pro` | Gemini model name |
+
+> The API key for the **selected** provider must be set — the server validates this at startup and refuses to start with a clear error if the key is missing.
 
 ### Query Engine
 
@@ -205,7 +217,10 @@ Ask a natural language question or instruction.
 #### Request Body
 
 ```json
-{ "query": "<natural language>" }
+{
+  "query": "<natural language>",
+  "provider": "openai | anthropic | gemini"  // optional — overrides LLM_PROVIDER
+}
 ```
 
 #### READ_ONLY mode response
@@ -217,6 +232,8 @@ Ask a natural language question or instruction.
   "data": [{ "customer_id": 42, "total_value": "9850.00" }],
   "row_count": 10,
   "type": "READ",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-20250514",
   "cost_estimation": {
     "total_cost": 18.5,
     "has_seq_scan": false,
@@ -236,7 +253,9 @@ Ask a natural language question or instruction.
   "data": [],
   "row_count": 1,
   "type": "WRITE",
-  "affected_rows": 1
+  "affected_rows": 1,
+  "provider": "openai",
+  "model": "gpt-4o"
 }
 ```
 
